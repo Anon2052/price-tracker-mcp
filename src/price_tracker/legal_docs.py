@@ -70,58 +70,7 @@ scogg3@gmail.com
 """
 
 
-PRIVACY_POLICY = """# Privacy Policy
-
-**IOConnex LLC** ("we," "us," "our")
-Effective date: September 23, 2026 · Last updated: September 23, 2026
-
-> *Template document, not legal advice. Have an attorney review before relying on it.*
-
-## 1. What we collect
-
-Our Services are APIs. We collect the minimum data necessary to operate them:
-
-- **Request metadata:** IP address, request path, timestamp, and user-agent, collected for rate limiting, abuse prevention, and operational logs.
-- **Payment information:**
-  - *x402 micropayments:* payer wallet address, payment amount, and authorization signatures. These are recorded on the public Base blockchain and are visible to anyone.
-  - *Stripe subscriptions:* payments are processed by Stripe, Inc. We do not receive or store your full card numbers. We store your Stripe customer/subscription identifiers and the SHA-256 hash of your subscriber key.
-- **Support correspondence:** information you send us when you contact us.
-
-We do not require user accounts, do not use advertising trackers or third-party analytics cookies, and do not collect names, emails, or other profile data unless you provide them.
-
-## 2. How we use it
-
-- To operate, meter, and bill for the Services;
-- To prevent abuse, fraud, and overload;
-- To respond to support requests;
-- To comply with legal obligations.
-
-## 3. What we don't do
-
-- We do not sell your personal information.
-- We do not share request data with advertisers or data brokers.
-- We do not use your API inputs to train models.
-
-## 4. Data retention
-
-Operational logs are retained for up to 12 months, then deleted or anonymized. Payment records are retained as required for tax and accounting purposes (generally 7 years).
-
-## 5. Security
-
-We use industry-standard measures (TLS in transit, hashed subscriber credentials, minimal data collection). No system is perfectly secure, and we cannot guarantee absolute security.
-
-## 6. Your rights
-
-You may request access to, correction of, or deletion of personal data we hold about you by contacting us below. We will respond within 30 days. Note that blockchain records (x402 payments) are public and cannot be deleted by us.
-
-## 7. Changes
-
-We may update this policy; material changes will be posted with a revised effective date.
-
-## 8. Contact
-
-scogg3@gmail.com
-"""
+PRIVACY_POLICY = """# Privacy Policy\n\n**IOConnex LLC** (\"we,\" \"us,\" \"our\")\nEffective date: September 23, 2026 · Last updated: September 23, 2026\n\n> *Template document, not legal advice. Have an attorney review before relying on it.*\n\n## 1. What we collect\n\nOur Services are APIs. We collect the minimum data necessary to operate them:\n\n- **Request metadata:** IP address, request path, and timestamp, collected for rate limiting, abuse prevention, and operational logs.\n- **Payment information:**\n  - *x402 micropayments:* payer wallet address, payment amount, and authorization signatures. These are recorded on the public Base blockchain and are visible to anyone. To verify and settle payments, the payment payload is transmitted to our x402 facilitator (Coinbase Developer Platform). We also log transaction metadata (transaction hash, payer address, amount) server-side, and we temporarily hold payment signatures in server memory (up to 5 minutes) to prevent replay attacks.\n  - *Stripe subscriptions:* payments are processed by Stripe, Inc. We do not receive or store your full card numbers. We store your Stripe customer identifier, the email address from your Checkout session, and the SHA-256 hash of your subscriber key.\n- **Support correspondence:** information you send us when you contact us.\n\nWe do not require user accounts, do not use advertising trackers or third-party analytics cookies, and do not collect names, emails, or other profile data unless you provide them.\n\n## 2. How we use it\n\n- To operate, meter, and bill for the Services;\n- To prevent abuse, fraud, and overload;\n- To respond to support requests;\n- To comply with legal obligations.\n\n## 3. What we don't do\n\n- We do not sell your personal information.\n- We do not share request data with advertisers or data brokers.\n- We do not use your API inputs to train models.\n\n## 4. Data retention\n\nOperational logs are retained for up to 12 months, then deleted or anonymized, as an operational practice (our hosting provider's own log retention also applies). Payment records are retained as required for tax and accounting purposes (generally 7 years).\n\n## 5. Security\n\nWe use industry-standard measures (TLS in transit, hashed subscriber credentials, minimal data collection). No system is perfectly secure, and we cannot guarantee absolute security.\n\n## 6. Your rights\n\nYou may request access to, correction of, or deletion of personal data we hold about you by contacting us below. We will respond within 30 days. Note that blockchain records (x402 payments) are public and cannot be deleted by us.\n\n## 7. Changes\n\nWe may update this policy; material changes will be posted with a revised effective date.\n\n## 8. Contact\n\nscogg3@gmail.com\n"""
 
 
 REFUND_POLICY = """# Refund Policy
