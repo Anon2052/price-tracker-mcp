@@ -255,7 +255,7 @@ def _b64url_nopad(data: bytes) -> str:
 def _load_ed25519_key(secret: str) -> ed25519.Ed25519PrivateKey:
     """Load an Ed25519 private key from PEM, base64, or hex.
 
-    Accepts a PEM ``-----BEGIN PRIVATE KEY-----`` block, or the raw key
+    Accepts a PEM-encoded PKCS#8 private-key block, or the raw key
     material (32-byte seed or 64-byte private key) encoded as base64
     (standard or urlsafe) or hex.
     """
