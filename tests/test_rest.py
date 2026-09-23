@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import time
 
 import pytest
 from fastapi.testclient import TestClient
 
 from price_tracker import price as price_mod
+from price_tracker import x402 as x402_mod
 from price_tracker.rest_app import create_app
 
 _OG_HTML = """<html><head>
@@ -33,7 +36,8 @@ def test_health(client):
     body = r.json()
     assert body["status"] == "ok"
     assert "version" in body
-    assert body["x402"] == "false"
+    assert body["x402"] == "disabled"
+    assert body["stripe"] == "disabled"
 
 
 def test_price_endpoint(client):
@@ -104,17 +108,43 @@ def _enable_x402(monkeypatch):
     monkeypatch.setenv("X402_PAY_TO", "0xAbC123")
 
 
-def _payment_header(**over):
-    payload = {
-        "asset": "USDC",
-        "network": "base",
-        "amount": "0.015",
-        "pay_to": "0xAbC123",
-        "payer": "0xDeF456",
-        "signature": "0xSig789",
+def _payment_header(signature="0xSig789", **auth_over):
+    # Real x402 v1 format: base64-encoded JSON EIP-3009 authorization payload.
+    now = int(time.time())
+    auth = {
+        "from": "0xDeF456",
+        "to": "0xAbC123",
+        "value": "20000",
+        "validAfter": str(now - 60),
+        "validBefore": str(now + 300),
+        "nonce": "0xnonce1",
     }
-    payload.update(over)
-    return {"X-Payment": json.dumps(payload)}
+    auth.update(auth_over)
+    payload = {
+        "x402Version": 1,
+        "scheme": "exact",
+        "network": "base",
+        "payload": {"signature": signature, "authorization": auth},
+    }
+    return {"X-Payment": base64.b64encode(json.dumps(payload).encode()).decode()}
+
+
+def _mock_verify_ok(monkeypatch):
+    async def fake_verify(payment_payload, requirements):
+        return True, None, "0xDeF456"
+
+    async def fake_settle(payment_payload, requirements):
+        return {
+            "success": True,
+            "transaction": "0xTx",
+            "network": "base",
+            "payer": "0xDeF456",
+            "errorReason": None,
+        }
+
+    monkeypatch.setattr(x402_mod, "facilitator_verify", fake_verify)
+    monkeypatch.setattr(x402_mod, "facilitator_settle", fake_settle)
+    x402_mod._reset_replay_cache()
 
 
 def test_x402_disabled_by_default_passes_through(client):
@@ -130,13 +160,14 @@ def test_x402_enabled_blocks_without_payment(monkeypatch):
     assert xc.get("/health").status_code == 200
 
 
-def test_x402_enabled_accepts_structurally_valid_payment(stubbed_backends, monkeypatch):
+def test_x402_enabled_accepts_facilitator_verified_payment(stubbed_backends, monkeypatch):
     _enable_x402(monkeypatch)
+    _mock_verify_ok(monkeypatch)
     xc = TestClient(create_app())
     r = xc.post(
         "/price",
         json={"url": "https://example.com/"},
-        headers=_payment_header(),
+        headers=_payment_header(signature="0xRestOk1"),
     )
     assert r.status_code == 200, r.text
     assert r.json()["price"] == pytest.approx(79.99)

@@ -22,9 +22,11 @@ from . import __version__
 from . import affiliate as _affiliate
 from . import price as _price
 from .affiliate import AffiliateError
+from .billing import router as billing_router
+from .billing import stripe_effective_enabled
 from .mcp_server import mcp
 from .price import PriceError
-from .x402 import X402PaymentMiddleware, warn_if_stub_enabled
+from .x402 import X402PaymentMiddleware, warn_if_payments_live, x402_effective_enabled
 
 log = logging.getLogger("price_tracker")
 
@@ -79,7 +81,7 @@ def create_app(rate_limit: str | None = None) -> FastAPI:
     )
 
     # x402 metering (env-gated, OFF by default) runs outermost.
-    warn_if_stub_enabled()
+    warn_if_payments_live()
     app.add_middleware(X402PaymentMiddleware)
 
     limiter = Limiter(key_func=get_remote_address)
@@ -113,8 +115,11 @@ def create_app(rate_limit: str | None = None) -> FastAPI:
         return {
             "status": "ok",
             "version": __version__,
-            "x402": os.environ.get("X402_ENABLED", "false"),
+            "x402": "enabled" if x402_effective_enabled() else "disabled",
+            "stripe": "enabled" if stripe_effective_enabled() else "disabled",
         }
+
+    app.include_router(billing_router)
 
     @app.post("/price")
     @limiter.limit(limit)
