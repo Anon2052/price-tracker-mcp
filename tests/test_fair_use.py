@@ -167,7 +167,7 @@ def test_subscriber_over_cap_429_with_actionable_body(subscriber_client):
     r = subscriber_client.post("/price", json={"url": "https://example.com/"}, headers=headers)
     assert r.status_code == 429, r.text
     body = r.json()
-    assert body["error"] == "subscriber_monthly_limit_exceeded"
+    assert body["error"] == "subscriber_monthly_cap_exceeded"
     assert body["monthly_call_limit"] == 2
     assert body["calls_used"] == 2
     # Reset date: first of next month, UTC, ISO Zulu.
@@ -215,7 +215,7 @@ def test_cap_covers_mcp_tools_call(subscriber_client):
     assert second.status_code != 429
     third = subscriber_client.post("/mcp", json=body, headers=headers)
     assert third.status_code == 429
-    assert third.json()["error"] == "subscriber_monthly_limit_exceeded"
+    assert third.json()["error"] == "subscriber_monthly_cap_exceeded"
 
 
 def test_x402_payers_not_capped(monkeypatch, tmp_path):

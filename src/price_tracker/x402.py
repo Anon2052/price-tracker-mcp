@@ -474,7 +474,7 @@ def subscriber_limit_response(usage: dict) -> JSONResponse:
     return JSONResponse(
         status_code=429,
         content={
-            "error": "subscriber_monthly_limit_exceeded",
+            "error": "subscriber_monthly_cap_exceeded",
             "message": (
                 f"Monthly fair-use limit reached: {usage['usage']} of "
                 f"{usage['limit']} included calls used. Your allowance resets "
