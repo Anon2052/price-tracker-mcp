@@ -40,6 +40,9 @@ def test_legal_routes_never_402_when_x402_enabled(monkeypatch):
     monkeypatch.setenv("X402_ENABLED", "true")
     monkeypatch.setenv("X402_PAY_TO", "0xAbC123")
     monkeypatch.setenv("X402_FACILITATOR_URL", "https://example.com/facilitator")
+    # Free tier pinned off so the unpaid proof-of-enforcement call below hits
+    # the pure x402 402 challenge instead of the free bucket.
+    monkeypatch.setenv("FREE_TIER_ENABLED", "0")
     xc = TestClient(create_app())
     for path in _DOCS:
         r = xc.get(path)

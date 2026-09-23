@@ -47,6 +47,18 @@ Payments OFF by default: ``stripe_effective_enabled()`` requires
 ``STRIPE_ENABLED=true`` AND ``STRIPE_SECRET_KEY`` AND ``STRIPE_WEBHOOK_SECRET``
 AND ``STRIPE_PRICE_ID``. Flag on but config incomplete -> ERROR at startup,
 treated as disabled (fail closed).
+
+Free tier: when x402 is enabled, anonymous callers (no subscriber key, no
+X-Payment) draw from a monthly free credit bucket keyed by client IP
+(``FREE_MONTHLY_CREDITS``, default 50 — Scott's call; kill switch
+``FREE_TIER_ENABLED``). Exhaustion -> HTTP 402 ``free_tier_exhausted``
+(429 stays exclusive to the subscriber cap). IPs are stored as SHA-256
+hashes, never raw.
+
+Usage analytics: every served call on a metered path is rolled up into the
+``usage_daily`` table (date/tool/plan_type aggregates — no PII, no IPs):
+``GET /billing/stats`` (``ADMIN_KEY``-gated) reports per-day and total
+usage by plan type. The stats endpoint is un-metered.
 """
 
 from __future__ import annotations
@@ -163,6 +175,8 @@ def init_db() -> Path:
     with sqlite3.connect(path) as conn:
         conn.execute(_SCHEMA)
         conn.execute(_USAGE_SCHEMA)
+        conn.execute(_FREE_TIER_SCHEMA)
+        conn.execute(_USAGE_DAILY_SCHEMA)
         conn.commit()
     _ensure_usage_columns()
     return path
@@ -377,6 +391,244 @@ def get_subscriber_usage(key: str) -> dict:
     }
 
 
+# --------------------------------------------------------------------------
+# Free tier (per client IP, calendar month UTC)
+
+
+_FREE_TIER_SCHEMA = """CREATE TABLE IF NOT EXISTS free_tier_usage (
+    ip_hash TEXT PRIMARY KEY,
+    month TEXT NOT NULL,
+    credits REAL NOT NULL DEFAULT 0
+)"""
+
+# Monthly free credit bucket for anonymous callers. Business decision — this
+# is Scott's call to tune. Default 50 credits = $0.50 of API calls at x402
+# list prices (1 credit = $0.01). Same credit math as the subscriber cap:
+# ``x402.price_to_credits`` is the single source of truth — billing never
+# prices a call itself.
+DEFAULT_FREE_MONTHLY_CREDITS = 50.0
+
+
+def free_tier_enabled() -> bool:
+    """Kill switch: ``FREE_TIER_ENABLED=false``/``0`` skips the free path
+    entirely (calls fall straight to the x402 402 challenge)."""
+    return _env_flag("FREE_TIER_ENABLED", "true")
+
+
+def free_monthly_credit_limit() -> float:
+    """Resolved monthly free credit bucket: env override -> baked-in default."""
+    raw = os.environ.get("FREE_MONTHLY_CREDITS", "").strip()
+    if not raw:
+        return DEFAULT_FREE_MONTHLY_CREDITS
+    try:
+        value = float(raw)
+    except ValueError:
+        log.warning(
+            "Invalid FREE_MONTHLY_CREDITS=%r; using default %s",
+            raw,
+            DEFAULT_FREE_MONTHLY_CREDITS,
+        )
+        return DEFAULT_FREE_MONTHLY_CREDITS
+    if not math.isfinite(value) or value < 0:
+        log.warning(
+            "Invalid FREE_MONTHLY_CREDITS=%r; using default %s",
+            raw,
+            DEFAULT_FREE_MONTHLY_CREDITS,
+        )
+        return DEFAULT_FREE_MONTHLY_CREDITS
+    return value
+
+
+def record_free_tier_usage(ip: str, cost: float) -> dict:
+    """Check + deduct free-tier credits for one anonymous call.
+
+    Keyed by SHA-256 of the client IP (never the raw IP), calendar month UTC.
+    Calls whose credit cost would push usage over the bucket are rejected
+    and deduct NOTHING. Zero-cost calls are always allowed, even at a zero
+    credit limit.
+
+    Returns ``{"allowed": bool, "credits_used": float, "free_limit": float,
+    "reset_at": str}``.
+
+    Same concurrency note as the subscriber cap: the read-modify-write is
+    serialized by SQLite's single-writer lock, so exact cap enforcement under
+    heavy concurrency is best-effort. Abuse backstop is the 60/min per-IP
+    rate limit (slowapi), not this bucket — see PR body for the v1 IP-rotation
+    limitation.
+    """
+    ip_hash = hashlib.sha256(ip.encode("utf-8")).hexdigest()
+    init_db()
+    month = current_month()
+    limit = free_monthly_credit_limit()
+    with sqlite3.connect(db_path()) as conn:
+        row = conn.execute(
+            "SELECT month, credits FROM free_tier_usage WHERE ip_hash = ?", (ip_hash,)
+        ).fetchone()
+        used = float(row[1] or 0.0) if row is not None and row[0] == month else 0.0
+        new_used = round(used + cost, 6)
+        if new_used <= limit:
+            if row is None or row[0] != month:
+                conn.execute(
+                    "INSERT INTO free_tier_usage (ip_hash, month, credits) "
+                    "VALUES (?, ?, ?) ON CONFLICT(ip_hash) DO UPDATE SET "
+                    "month = excluded.month, credits = excluded.credits",
+                    (ip_hash, month, new_used),
+                )
+            else:
+                conn.execute(
+                    "UPDATE free_tier_usage SET credits = ? WHERE ip_hash = ?",
+                    (new_used, ip_hash),
+                )
+            conn.commit()
+            allowed, reported = True, new_used
+        else:
+            allowed, reported = False, used
+    return {
+        "allowed": allowed,
+        "credits_used": reported,
+        "free_limit": limit,
+        "reset_at": month_reset_at_iso(month),
+    }
+
+
+def get_free_tier_usage(ip: str) -> dict:
+    """Read-only free-bucket peek for an IP — never deducts, never gates."""
+    ip_hash = hashlib.sha256(ip.encode("utf-8")).hexdigest()
+    init_db()
+    month = current_month()
+    used = 0.0
+    if db_path().exists():
+        try:
+            with sqlite3.connect(db_path()) as conn:
+                row = conn.execute(
+                    "SELECT month, credits FROM free_tier_usage WHERE ip_hash = ?",
+                    (ip_hash,),
+                ).fetchone()
+        except sqlite3.Error:
+            log.exception("free tier DB read failed")
+            row = None
+        if row is not None and row[0] == month:
+            used = float(row[1] or 0.0)
+    return {
+        "credits_used": used,
+        "free_limit": free_monthly_credit_limit(),
+        "resets_at": month_reset_at_iso(month),
+        "period": month,
+    }
+
+
+# --------------------------------------------------------------------------
+# Usage analytics (per-day rollups; no PII, IPs never stored)
+
+
+_USAGE_DAILY_SCHEMA = """CREATE TABLE IF NOT EXISTS usage_daily (
+    date TEXT NOT NULL,
+    tool TEXT NOT NULL,
+    plan_type TEXT NOT NULL,
+    calls INTEGER NOT NULL DEFAULT 0,
+    credits REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (date, tool, plan_type)
+)"""
+
+PLAN_TYPES = ("free", "subscriber", "x402")
+
+_MAX_STATS_DAYS = 365
+
+
+def _utc_today() -> str:
+    """Current date in UTC as ``YYYY-MM-DD``.
+
+    Small and deliberately patchable: tests pin the date to simulate day
+    boundaries without touching the clock.
+    """
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+
+
+def record_usage_rollup(tool: str, plan_type: str, credits: float) -> None:
+    """Roll one served call into the ``usage_daily`` aggregates.
+
+    ``credits`` is the credits actually deducted (free/subscriber) or the
+    credits that WOULD have been charged (x402 path, from list price).
+    Zero-credit outcomes are recorded as 0. Only aggregates are stored —
+    no IPs, no keys, no payer info.
+    """
+    if plan_type not in PLAN_TYPES:
+        raise ValueError(f"unknown plan_type {plan_type!r}")
+    init_db()
+    day = _utc_today()
+    credits = round(float(credits or 0.0), 6)
+    with sqlite3.connect(db_path()) as conn:
+        conn.execute(
+            "INSERT INTO usage_daily (date, tool, plan_type, calls, credits) "
+            "VALUES (?, ?, ?, 1, ?) "
+            "ON CONFLICT(date, tool, plan_type) DO UPDATE SET "
+            "calls = usage_daily.calls + 1, "
+            "credits = round(usage_daily.credits + excluded.credits, 6)",
+            (day, tool, plan_type, credits),
+        )
+        conn.commit()
+
+
+def get_usage_stats(days: int) -> dict:
+    """Per-day usage aggregates plus totals for the last ``days`` days (UTC).
+
+    ``days`` is clamped to 1..365. Shape::
+
+        {"days": [{"date": "YYYY-MM-DD",
+                   "tools": {name: {"free": {"calls", "credits"},
+                                    "subscriber": {...}, "x402": {...}}}}],
+         "totals": {"free": {"calls", "credits"},
+                    "subscriber": {...}, "x402": {...}}}
+
+    Every tool row carries all three plan keys (missing plans are 0s) so
+    consumers get a stable shape. No PII: only aggregates.
+    """
+    days = max(1, min(_MAX_STATS_DAYS, days))
+    init_db()
+    # Pinned via _utc_today() so tests can simulate day boundaries.
+    end = datetime.date.fromisoformat(_utc_today())
+    start = end - datetime.timedelta(days=days - 1)
+    per_day: dict[str, dict[str, dict[str, dict]]] = {}
+    with sqlite3.connect(db_path()) as conn:
+        rows = conn.execute(
+            "SELECT date, tool, plan_type, calls, credits FROM usage_daily "
+            "WHERE date >= ? AND date <= ?",
+            (start.isoformat(), end.isoformat()),
+        ).fetchall()
+    for date, tool, plan_type, calls, credits in rows:
+        per_day.setdefault(date, {}).setdefault(tool, {})[plan_type] = {
+            "calls": calls,
+            "credits": credits,
+        }
+    days_out = []
+    totals = {plan: {"calls": 0, "credits": 0.0} for plan in PLAN_TYPES}
+    day = start
+    while day <= end:
+        ds = day.isoformat()
+        tools = {}
+        for tool, plans in per_day.get(ds, {}).items():
+            entry = {plan: plans.get(plan, {"calls": 0, "credits": 0.0}) for plan in PLAN_TYPES}
+            tools[tool] = entry
+            for plan in PLAN_TYPES:
+                totals[plan]["calls"] += entry[plan]["calls"]
+                totals[plan]["credits"] = round(totals[plan]["credits"] + entry[plan]["credits"], 6)
+        days_out.append({"date": ds, "tools": tools})
+        day += datetime.timedelta(days=1)
+    return {"days": days_out, "totals": totals}
+
+
+def admin_key_valid(provided: str) -> bool:
+    """True iff ``provided`` matches the ``ADMIN_KEY`` env shared secret.
+
+    Fail closed: no ADMIN_KEY set -> nothing validates (the stats endpoint
+    401s everything until Scott sets it on Render).
+    """
+    expected = os.environ.get("ADMIN_KEY", "").strip()
+    if not expected:
+        return False
+    return secrets.compare_digest((provided or "").strip(), expected)
+
+
 def _to_plain_dict(obj):
     """stripe-python v15+ returns StripeObjects (no .get()); normalize to dict."""
     if hasattr(obj, "to_dict"):
@@ -507,3 +759,23 @@ def billing_usage(request: Request):
     if not key or not valid_subscriber_key(key):
         raise HTTPException(status_code=401, detail="invalid or missing X-Subscriber-Key")
     return get_subscriber_usage(key)
+
+
+@router.get("/billing/stats")
+def billing_stats(request: Request, days: int = 30, admin_key: str | None = None):
+    """Usage analytics: per-day rollups + totals for the last ``days`` days.
+
+    Authed by the ``ADMIN_KEY`` env shared secret, sent as the
+    ``X-Admin-Key`` header or the ``?admin_key=`` query param; 401 JSON when
+    missing/mismatched. Scott MUST set ``ADMIN_KEY`` on Render (long random
+    string) — until then this endpoint 401s everything (fail closed).
+
+    Cheap and un-metered: never consumes subscriber/free quota, never 402s
+    (``/billing/*`` paths are never x402-gated and the middleware skips them
+    before metering). No PII in the rollups — IPs are never stored, only
+    date/tool/plan-type aggregates. ``days`` is clamped to 1..365.
+    """
+    provided = request.headers.get("x-admin-key", "") or (admin_key or "")
+    if not admin_key_valid(provided):
+        raise HTTPException(status_code=401, detail="invalid or missing admin key")
+    return get_usage_stats(days)

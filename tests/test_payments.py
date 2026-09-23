@@ -29,6 +29,9 @@ def _enable_x402(monkeypatch, **over):
     monkeypatch.setenv(
         "X402_FACILITATOR_URL", over.get("facilitator", "https://x402.test/facilitator")
     )
+    # These tests exercise the pure x402 challenge flow, so the free tier is
+    # pinned off (it would otherwise serve anonymous calls from the bucket).
+    monkeypatch.setenv("FREE_TIER_ENABLED", "0")
     for k, v in over.get("prices", {}).items():
         monkeypatch.setenv(k, v)
 
