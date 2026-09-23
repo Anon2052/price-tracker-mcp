@@ -37,5 +37,10 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+# legal_docs.py embeds the legal templates verbatim (long markdown lines are
+# intentional — the served text must match the source documents byte-for-byte).
+[tool.ruff.lint.per-file-ignores]
+"src/price_tracker/legal_docs.py" = ["E501"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

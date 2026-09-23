@@ -56,8 +56,9 @@ FACILITATOR_TIMEOUT_SECONDS = 15.0
 # Default facilitator: Base Sepolia testnet ONLY. See module docstring.
 DEFAULT_FACILITATOR_URL = "https://x402.org/facilitator"
 
-# Paths that never require payment (health checks, docs).
-EXEMPT_PREFIXES = ("/health", "/docs", "/redoc", "/openapi.json", "/favicon.ico")
+# Paths that never require payment (health checks, docs, legal pages).
+# Prefix matching covers subpaths, e.g. "/legal" covers /legal/terms.
+EXEMPT_PREFIXES = ("/health", "/docs", "/redoc", "/openapi.json", "/favicon.ico", "/legal")
 
 # JSON-RPC methods that stay free (discovery must work for directory scans).
 JSONRPC_DISCOVERY_METHODS = {"initialize", "tools/list", "ping"}
