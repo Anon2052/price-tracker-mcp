@@ -28,6 +28,7 @@ The service is a single stateless container: FastAPI REST + FastMCP (streamable 
 | `RATE_LIMIT` | `60/minute` | e.g. `600/hour` |
 | `X402_PRICE_USDC` / `X402_PAY_TO` | `0.015` / unset | Only relevant when x402 verification is real |
 | `BILLING_DB_PATH` | `/var/lib/price-tracker-mcp/billing.db` | SQLite file for Stripe subscriber keys. Prod default is the persistent-disk mount; override per env |
+| `SUBSCRIBER_MONTHLY_CALL_LIMIT` | `1000` | Fair-use call cap per Pro subscriber per calendar month (UTC). Business call — Scott's to tune (see PR body) |
 
 No secrets are hardcoded in the image. `SEARCH_API_KEY` is supplied at deploy time.
 

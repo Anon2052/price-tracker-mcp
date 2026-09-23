@@ -464,6 +464,31 @@ def payment_invalid_response(
     )
 
 
+def subscriber_limit_response(usage: dict) -> JSONResponse:
+    """HTTP 429 for a subscriber key that exceeded its monthly fair-use cap.
+
+    Never silently serves: the body carries the cap, the current usage, the
+    reset date (first of next month, UTC), and the x402 per-call fallback so
+    the subscriber can keep working right now.
+    """
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error": "subscriber_monthly_limit_exceeded",
+            "message": (
+                f"Monthly fair-use limit reached: {usage['usage']} of "
+                f"{usage['limit']} included calls used. Your allowance resets "
+                f"on {usage['reset_at']}. You can keep using this endpoint "
+                "right now by paying per call with x402 — resend the request "
+                "without X-Subscriber-Key and include a signed X-Payment header."
+            ),
+            "monthly_call_limit": usage["limit"],
+            "calls_used": usage["usage"],
+            "resets_at": usage["reset_at"],
+        },
+    )
+
+
 # --------------------------------------------------------------------------
 # Price resolution
 
@@ -524,10 +549,16 @@ class X402PaymentMiddleware(BaseHTTPMiddleware):
         if not x402_effective_enabled():
             return await call_next(request)
 
-        # Stripe subscriber bypass: valid key -> no per-call charge.
-        # Invalid/expired key falls through to the normal x402 flow (not an error).
+        # Stripe subscriber bypass: valid key -> no per-call charge, but the
+        # monthly fair-use cap still applies (see billing.record_subscriber_call).
+        # The cap covers every subscriber-key-authenticated call (REST and MCP)
+        # because all of them pass through this middleware. Invalid/expired
+        # key falls through to the normal x402 flow (not an error).
         sub_key = request.headers.get("x-subscriber-key")
         if sub_key and billing.valid_subscriber_key(sub_key):
+            usage = billing.record_subscriber_call(sub_key)
+            if not usage["allowed"]:
+                return subscriber_limit_response(usage)
             return await call_next(request)
 
         resolved = await _resolve_price(request)
@@ -669,6 +700,7 @@ __all__ = [
     "FacilitatorUnavailable",
     "payment_required_response",
     "payment_invalid_response",
+    "subscriber_limit_response",
     "USDC_BASE_ADDRESS",
     "TOOL_PRICE_DEFAULTS",
 ]

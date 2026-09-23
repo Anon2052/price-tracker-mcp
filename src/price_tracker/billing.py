@@ -23,6 +23,13 @@ Endpoints (all 404 unless Stripe is effectively enabled):
 The middleware checks ``X-Subscriber-Key`` -> sha256 -> active row -> bypass.
 Invalid/expired keys fall through to the normal x402 flow (not a hard error).
 
+Fair use: Pro subscriptions include ``SUBSCRIBER_MONTHLY_CALL_LIMIT`` calls
+per calendar month (UTC; default 1000 — Scott's call, see PR body). Usage is
+tracked per subscriber-key hash in the same SQLite DB; the counter rolls over
+on the month boundary. Over the cap -> HTTP 429 with an actionable body (the
+cap, usage, reset date, and the x402 per-call fallback) — never a silent
+serve. The cap applies to subscriber-key auth only, not x402 per-call payers.
+
 Storage: stdlib ``sqlite3`` at ``BILLING_DB_PATH`` (default
 ``/var/lib/price-tracker-mcp/billing.db`` — a Render persistent-disk mount in
 production; override per-env as needed); the parent directory is created on
@@ -37,6 +44,7 @@ treated as disabled (fail closed).
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import logging
 import os
@@ -67,6 +75,17 @@ _SCHEMA = """CREATE TABLE IF NOT EXISTS subscribers (
     updated_at TEXT NOT NULL
 )"""
 
+_USAGE_SCHEMA = """CREATE TABLE IF NOT EXISTS subscriber_usage (
+    key_hash TEXT PRIMARY KEY,
+    month TEXT NOT NULL,
+    calls INTEGER NOT NULL DEFAULT 0
+)"""
+
+# Monthly fair-use call cap for the Pro subscription. Business decision —
+# this is Scott's call to tune. Rationale for 1000: at ~$0.02 avg per-call
+# price, the $9/mo plan breaks even at ~450 calls; 1000 gives headroom.
+# Overridable per environment via SUBSCRIBER_MONTHLY_CALL_LIMIT.
+DEFAULT_MONTHLY_CALL_LIMIT = 1000
 
 
 def _env_flag(name: str, default: str = "false") -> bool:
@@ -110,11 +129,16 @@ def db_path() -> Path:
 
 
 def init_db() -> Path:
-    """Create the DB (and parent dir) if missing. Write path only."""
+    """Create the DB (and parent dir) if missing. Write path only.
+
+    Idempotent: tables are created ``IF NOT EXISTS`` so first boot on a
+    fresh persistent disk works and later boots are no-ops.
+    """
     path = db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(path) as conn:
         conn.execute(_SCHEMA)
+        conn.execute(_USAGE_SCHEMA)
         conn.commit()
     return path
 
@@ -188,6 +212,108 @@ def valid_subscriber_key(key: str) -> bool:
         log.exception("subscriber DB read failed")
         return False
     return bool(row and row[0] == "active")
+
+
+# --------------------------------------------------------------------------
+# Fair-use metering (per subscriber-key hash, calendar month UTC)
+
+
+def subscriber_monthly_call_limit() -> int:
+    """Resolved monthly fair-use cap: env override -> baked-in default."""
+    raw = os.environ.get("SUBSCRIBER_MONTHLY_CALL_LIMIT", "").strip()
+    if not raw:
+        return DEFAULT_MONTHLY_CALL_LIMIT
+    try:
+        value = int(raw)
+    except ValueError:
+        log.warning(
+            "Invalid SUBSCRIBER_MONTHLY_CALL_LIMIT=%r; using default %d",
+            raw,
+            DEFAULT_MONTHLY_CALL_LIMIT,
+        )
+        return DEFAULT_MONTHLY_CALL_LIMIT
+    if value < 0:
+        log.warning(
+            "Negative SUBSCRIBER_MONTHLY_CALL_LIMIT=%r; using default %d",
+            raw,
+            DEFAULT_MONTHLY_CALL_LIMIT,
+        )
+        return DEFAULT_MONTHLY_CALL_LIMIT
+    return value
+
+
+def current_month() -> str:
+    """Current calendar month in UTC as ``YYYY-MM``.
+
+    Small and deliberately patchable: tests pin the month to simulate
+    rollover without touching the clock.
+    """
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m")
+
+
+def month_reset_at_iso(month: str) -> str:
+    """First of the month after ``month`` at 00:00 UTC, as an ISO-8601 Z string."""
+    year, mon = (int(part) for part in month.split("-", 1))
+    if mon == 12:
+        year, mon = year + 1, 1
+    else:
+        mon += 1
+    return f"{year:04d}-{mon:02d}-01T00:00:00Z"
+
+
+def record_subscriber_call(key: str) -> dict:
+    """Check + count one subscriber-key-authenticated call.
+
+    Tracks usage per subscriber-key hash (SHA-256, never the raw key) in the
+    same SQLite DB; the counter rolls over on the calendar-month boundary
+    (UTC). Calls that would exceed the cap are rejected and NOT counted.
+
+    Call only for keys already validated by ``valid_subscriber_key``.
+
+    Returns ``{"allowed": bool, "usage": int, "limit": int, "reset_at": str}``.
+
+    Concurrency note: the read-modify-write is serialized by SQLite's
+    single-writer lock, so exact cap enforcement under heavy concurrency is
+    best-effort (a burst racing the boundary may admit one extra call).
+    """
+    key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    init_db()
+    month = current_month()
+    limit = subscriber_monthly_call_limit()
+    with sqlite3.connect(db_path()) as conn:
+        row = conn.execute(
+            "SELECT month, calls FROM subscriber_usage WHERE key_hash = ?", (key_hash,)
+        ).fetchone()
+        if row is None or row[0] != month:
+            # First call this month (or ever): start a fresh counter.
+            if 1 <= limit:
+                conn.execute(
+                    "INSERT INTO subscriber_usage (key_hash, month, calls) "
+                    "VALUES (?, ?, 1) ON CONFLICT(key_hash) DO UPDATE SET "
+                    "month = excluded.month, calls = excluded.calls",
+                    (key_hash, month),
+                )
+                conn.commit()
+                usage, allowed = 1, True
+            else:
+                # Cap is zero: reject before anything is counted.
+                usage, allowed = 0, False
+        elif row[1] >= limit:
+            # Over the cap: reject without counting this attempt.
+            usage, allowed = row[1], False
+        else:
+            usage, allowed = row[1] + 1, True
+            conn.execute(
+                "UPDATE subscriber_usage SET calls = ? WHERE key_hash = ?",
+                (usage, key_hash),
+            )
+            conn.commit()
+    return {
+        "allowed": allowed,
+        "usage": usage,
+        "limit": limit,
+        "reset_at": month_reset_at_iso(month),
+    }
 
 
 def _to_plain_dict(obj):
