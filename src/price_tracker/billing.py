@@ -19,16 +19,23 @@ Endpoints (all 404 unless Stripe is effectively enabled):
   the subscription is cancelled).
 - ``GET /billing/status`` -> ``{"stripe_enabled": bool, "x402_enabled": bool}``
   (effective state only, never secret values).
+- ``GET /billing/usage`` -> fair-use credit usage for the ``X-Subscriber-Key``
+  caller: ``{"credits_used", "credit_limit", "resets_at", "period"}``. Read-only
+  (never deducts, never 429-gated, never x402-gated); 401 for missing/invalid
+  keys.
 
 The middleware checks ``X-Subscriber-Key`` -> sha256 -> active row -> bypass.
 Invalid/expired keys fall through to the normal x402 flow (not a hard error).
 
-Fair use: Pro subscriptions include ``SUBSCRIBER_MONTHLY_CALL_LIMIT`` calls
-per calendar month (UTC; default 1000 — Scott's call, see PR body). Usage is
-tracked per subscriber-key hash in the same SQLite DB; the counter rolls over
-on the month boundary. Over the cap -> HTTP 429 with an actionable body (the
-cap, usage, reset date, and the x402 per-call fallback) — never a silent
-serve. The cap applies to subscriber-key auth only, not x402 per-call payers.
+Fair use: Pro subscriptions include ``SUBSCRIBER_MONTHLY_CREDIT_LIMIT``
+credits per calendar month (UTC; default 1000 credits = $10 of API calls for
+$9/mo — Scott's call, see PR body). Credits price calls by their x402 list
+price: 1 credit = $0.01, so a $0.025 tool costs 2.5 credits and a $0.005 tool
+costs 0.5. Usage is tracked per subscriber-key hash in the same SQLite DB;
+the counter rolls over on the month boundary. Over the cap -> HTTP 429 with
+an actionable body (the cap, usage, reset date, and the x402 per-call
+fallback) — never a silent serve. The cap applies to subscriber-key auth
+only, not x402 per-call payers.
 
 Storage: stdlib ``sqlite3`` at ``BILLING_DB_PATH`` (default
 ``/var/lib/price-tracker-mcp/billing.db`` — a Render persistent-disk mount in
@@ -47,6 +54,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import logging
+import math
 import os
 import secrets
 import sqlite3
@@ -78,14 +86,30 @@ _SCHEMA = """CREATE TABLE IF NOT EXISTS subscribers (
 _USAGE_SCHEMA = """CREATE TABLE IF NOT EXISTS subscriber_usage (
     key_hash TEXT PRIMARY KEY,
     month TEXT NOT NULL,
-    calls INTEGER NOT NULL DEFAULT 0
+    credits REAL NOT NULL DEFAULT 0
 )"""
 
-# Monthly fair-use call cap for the Pro subscription. Business decision —
-# this is Scott's call to tune. Rationale for 1000: at ~$0.02 avg per-call
-# price, the $9/mo plan breaks even at ~450 calls; 1000 gives headroom.
-# Overridable per environment via SUBSCRIBER_MONTHLY_CALL_LIMIT.
-DEFAULT_MONTHLY_CALL_LIMIT = 1000
+
+def _ensure_usage_columns() -> None:
+    """Add the ``credits`` column to pre-credit ``subscriber_usage`` tables.
+
+    Tables created by the call-based fair-use build only have ``calls``; the
+    credit rebuild reads/writes ``credits``. Payments never went live, so no
+    data migration is needed — just make sure the column exists.
+    """
+    with sqlite3.connect(db_path()) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(subscriber_usage)")}
+        if "credits" not in columns:
+            conn.execute("ALTER TABLE subscriber_usage ADD COLUMN credits REAL NOT NULL DEFAULT 0")
+            conn.commit()
+
+
+# Monthly fair-use credit cap for the Pro subscription. Business decision —
+# this is Scott's call to tune. Rationale for 1000: $9/mo buys $10 of API
+# calls at x402 list prices (1 credit = $0.01), so a $0.025 tool burns
+# 2.5 credits per call. Overridable per environment via
+# SUBSCRIBER_MONTHLY_CREDIT_LIMIT.
+DEFAULT_MONTHLY_CREDIT_LIMIT = 1000.0
 
 
 def _env_flag(name: str, default: str = "false") -> bool:
@@ -140,6 +164,7 @@ def init_db() -> Path:
         conn.execute(_SCHEMA)
         conn.execute(_USAGE_SCHEMA)
         conn.commit()
+    _ensure_usage_columns()
     return path
 
 
@@ -218,27 +243,27 @@ def valid_subscriber_key(key: str) -> bool:
 # Fair-use metering (per subscriber-key hash, calendar month UTC)
 
 
-def subscriber_monthly_call_limit() -> int:
-    """Resolved monthly fair-use cap: env override -> baked-in default."""
-    raw = os.environ.get("SUBSCRIBER_MONTHLY_CALL_LIMIT", "").strip()
+def subscriber_monthly_credit_limit() -> float:
+    """Resolved monthly fair-use credit cap: env override -> baked-in default."""
+    raw = os.environ.get("SUBSCRIBER_MONTHLY_CREDIT_LIMIT", "").strip()
     if not raw:
-        return DEFAULT_MONTHLY_CALL_LIMIT
+        return DEFAULT_MONTHLY_CREDIT_LIMIT
     try:
-        value = int(raw)
+        value = float(raw)
     except ValueError:
         log.warning(
-            "Invalid SUBSCRIBER_MONTHLY_CALL_LIMIT=%r; using default %d",
+            "Invalid SUBSCRIBER_MONTHLY_CREDIT_LIMIT=%r; using default %s",
             raw,
-            DEFAULT_MONTHLY_CALL_LIMIT,
+            DEFAULT_MONTHLY_CREDIT_LIMIT,
         )
-        return DEFAULT_MONTHLY_CALL_LIMIT
-    if value < 0:
+        return DEFAULT_MONTHLY_CREDIT_LIMIT
+    if not math.isfinite(value) or value < 0:
         log.warning(
-            "Negative SUBSCRIBER_MONTHLY_CALL_LIMIT=%r; using default %d",
+            "Invalid SUBSCRIBER_MONTHLY_CREDIT_LIMIT=%r; using default %s",
             raw,
-            DEFAULT_MONTHLY_CALL_LIMIT,
+            DEFAULT_MONTHLY_CREDIT_LIMIT,
         )
-        return DEFAULT_MONTHLY_CALL_LIMIT
+        return DEFAULT_MONTHLY_CREDIT_LIMIT
     return value
 
 
@@ -261,16 +286,23 @@ def month_reset_at_iso(month: str) -> str:
     return f"{year:04d}-{mon:02d}-01T00:00:00Z"
 
 
-def record_subscriber_call(key: str) -> dict:
-    """Check + count one subscriber-key-authenticated call.
+def record_subscriber_usage(key: str, cost: float) -> dict:
+    """Check + deduct fair-use credits for one subscriber-key-authenticated call.
 
     Tracks usage per subscriber-key hash (SHA-256, never the raw key) in the
     same SQLite DB; the counter rolls over on the calendar-month boundary
-    (UTC). Calls that would exceed the cap are rejected and NOT counted.
+    (UTC). Calls whose credit cost would push usage over the cap are rejected
+    and deduct NOTHING. Zero-cost calls (free/discovery paths) are always
+    allowed, even at a zero credit limit.
+
+    ``cost`` is the call's credit cost as computed by ``x402.price_to_credits``
+    from the same per-tool price map the x402 middleware charges — billing
+    never prices a call itself.
 
     Call only for keys already validated by ``valid_subscriber_key``.
 
-    Returns ``{"allowed": bool, "usage": int, "limit": int, "reset_at": str}``.
+    Returns ``{"allowed": bool, "credits_used": float, "credit_limit": float,
+    "reset_at": str}``.
 
     Concurrency note: the read-modify-write is serialized by SQLite's
     single-writer lock, so exact cap enforcement under heavy concurrency is
@@ -279,40 +311,69 @@ def record_subscriber_call(key: str) -> dict:
     key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
     init_db()
     month = current_month()
-    limit = subscriber_monthly_call_limit()
+    limit = subscriber_monthly_credit_limit()
     with sqlite3.connect(db_path()) as conn:
         row = conn.execute(
-            "SELECT month, calls FROM subscriber_usage WHERE key_hash = ?", (key_hash,)
+            "SELECT month, credits FROM subscriber_usage WHERE key_hash = ?", (key_hash,)
         ).fetchone()
-        if row is None or row[0] != month:
-            # First call this month (or ever): start a fresh counter.
-            if 1 <= limit:
+        used = float(row[1] or 0.0) if row is not None and row[0] == month else 0.0
+        # round() kills binary floating-point drift from fractional credits
+        # (e.g. 0.5/2.5 steps), so exact-boundary comparisons stay exact.
+        new_used = round(used + cost, 6)
+        if new_used <= limit:
+            if row is None or row[0] != month:
                 conn.execute(
-                    "INSERT INTO subscriber_usage (key_hash, month, calls) "
-                    "VALUES (?, ?, 1) ON CONFLICT(key_hash) DO UPDATE SET "
-                    "month = excluded.month, calls = excluded.calls",
-                    (key_hash, month),
+                    "INSERT INTO subscriber_usage (key_hash, month, credits) "
+                    "VALUES (?, ?, ?) ON CONFLICT(key_hash) DO UPDATE SET "
+                    "month = excluded.month, credits = excluded.credits",
+                    (key_hash, month, new_used),
                 )
-                conn.commit()
-                usage, allowed = 1, True
             else:
-                # Cap is zero: reject before anything is counted.
-                usage, allowed = 0, False
-        elif row[1] >= limit:
-            # Over the cap: reject without counting this attempt.
-            usage, allowed = row[1], False
-        else:
-            usage, allowed = row[1] + 1, True
-            conn.execute(
-                "UPDATE subscriber_usage SET calls = ? WHERE key_hash = ?",
-                (usage, key_hash),
-            )
+                conn.execute(
+                    "UPDATE subscriber_usage SET credits = ? WHERE key_hash = ?",
+                    (new_used, key_hash),
+                )
             conn.commit()
+            allowed, reported = True, new_used
+        else:
+            # Over the cap: reject without deducting anything.
+            allowed, reported = False, used
     return {
         "allowed": allowed,
-        "usage": usage,
-        "limit": limit,
+        "credits_used": reported,
+        "credit_limit": limit,
         "reset_at": month_reset_at_iso(month),
+    }
+
+
+def get_subscriber_usage(key: str) -> dict:
+    """Read-only usage peek for a subscriber key — never counts or 429s.
+
+    Used by ``GET /billing/usage``; safe to call for any valid key, including
+    keys that already hit the cap.
+    """
+    key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    init_db()
+    month = current_month()
+    path = db_path()
+    used = 0.0
+    if path.exists():
+        try:
+            with sqlite3.connect(path) as conn:
+                row = conn.execute(
+                    "SELECT month, credits FROM subscriber_usage WHERE key_hash = ?",
+                    (key_hash,),
+                ).fetchone()
+        except sqlite3.Error:
+            log.exception("subscriber usage DB read failed")
+            row = None
+        if row is not None and row[0] == month:
+            used = float(row[1] or 0.0)
+    return {
+        "credits_used": used,
+        "credit_limit": subscriber_monthly_credit_limit(),
+        "resets_at": month_reset_at_iso(month),
+        "period": month,
     }
 
 
@@ -429,3 +490,20 @@ def billing_status():
         "stripe_enabled": stripe_effective_enabled(),
         "x402_enabled": x402_effective_enabled(),
     }
+
+
+@router.get("/billing/usage")
+def billing_usage(request: Request):
+    """Subscriber fair-use credit usage: ``{"credits_used", "credit_limit",
+    "resets_at", "period"}``.
+
+    Authed by ``X-Subscriber-Key`` (401 for missing/invalid keys). Read-only:
+    it never deducts credits and is never 429-gated by the cap itself — the
+    x402 middleware skips the fair-use check for this path, and the route
+    only reads. FREE: ``/billing/*`` paths are never x402-gated.
+    """
+    _require_enabled()
+    key = request.headers.get("x-subscriber-key", "").strip()
+    if not key or not valid_subscriber_key(key):
+        raise HTTPException(status_code=401, detail="invalid or missing X-Subscriber-Key")
+    return get_subscriber_usage(key)
