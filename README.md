@@ -45,6 +45,10 @@ curl localhost:8000/health
 | `X402_PRICE_USDC` / `X402_PAY_TO` | `0.015` / unset | Per-tool: `X402_PRICE_CHECK_PRICE_USDC` ($0.02), `X402_PRICE_MAKE_AFFILIATE_LINK_USDC` ($0.005) |
 | `X402_FACILITATOR_URL` | `https://x402.org/facilitator` | **Sepolia testnet only**; mainnet = CDP facilitator URL + CDP keys |
 | `STRIPE_ENABLED` | `false` | Needs `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID` |
+| `SUBSCRIBER_MONTHLY_CREDIT_LIMIT` | `1000` | Pro subscriber fair-use cap (credits; 1 credit = $0.01 of x402 list price) |
+| `FREE_TIER_ENABLED` | `true` | Kill switch for the anonymous monthly free bucket |
+| `FREE_MONTHLY_CREDITS` | `50` | Monthly free credits per client IP (X-Forwarded-For, first entry) |
+| `ADMIN_KEY` | unset | **Required** for `GET /billing/stats`; long random string, 401s everything until set |
 
 ## Deploy
 

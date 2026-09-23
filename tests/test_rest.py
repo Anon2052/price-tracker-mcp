@@ -106,6 +106,9 @@ def _enable_x402(monkeypatch):
     monkeypatch.setenv("X402_ENABLED", "true")
     monkeypatch.setenv("X402_PRICE_USDC", "0.015")
     monkeypatch.setenv("X402_PAY_TO", "0xAbC123")
+    # Pure-x402 tests: pin the free tier off so anonymous calls hit the
+    # 402 challenge instead of the free bucket.
+    monkeypatch.setenv("FREE_TIER_ENABLED", "0")
 
 
 def _payment_header(signature="0xSig789", **auth_over):
