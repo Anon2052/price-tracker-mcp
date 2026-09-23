@@ -148,6 +148,22 @@ def usdc_to_atomic(price: Decimal) -> int:
     return int(price * (10**USDC_DECIMALS))
 
 
+# Fair-use credit unit: 1 credit = $0.01 of x402 list price. Credit cost per
+# call = round(price_usd / 0.01, 1): $0.025 -> 2.5, $0.01 -> 1.0, $0.005 -> 0.5.
+CREDIT_USD = Decimal("0.01")
+
+
+def price_to_credits(price: Decimal) -> float:
+    """x402 list price -> fair-use credit cost for one call.
+
+    Single source of truth: the price comes from ``tool_price_usdc`` (the
+    same per-tool price map the x402 middleware charges from) — this function
+    only converts it. Env price overrides (``X402_PRICE_<NAME>_USDC``) flow
+    through automatically.
+    """
+    return float(round(price / CREDIT_USD, 1))
+
+
 # --------------------------------------------------------------------------
 # paymentRequirements (built server-side from env, never client-asserted)
 
@@ -464,6 +480,31 @@ def payment_invalid_response(
     )
 
 
+def subscriber_limit_response(usage: dict) -> JSONResponse:
+    """HTTP 429 for a subscriber key that exceeded its monthly fair-use cap.
+
+    Never silently serves: the body carries the credit cap, the current
+    credit usage, the reset date (first of next month, UTC), and the x402
+    per-call fallback so the subscriber can keep working right now.
+    """
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error": "subscriber_monthly_cap_exceeded",
+            "message": (
+                f"Monthly fair-use credit cap reached: {usage['credits_used']} of "
+                f"{usage['credit_limit']} credits used. Your allowance resets "
+                f"on {usage['reset_at']}. You can keep using this endpoint "
+                "right now by paying per call with x402 — resend the request "
+                "without X-Subscriber-Key and include a signed X-Payment header."
+            ),
+            "credits_used": usage["credits_used"],
+            "credit_limit": usage["credit_limit"],
+            "resets_at": usage["reset_at"],
+        },
+    )
+
+
 # --------------------------------------------------------------------------
 # Price resolution
 
@@ -524,10 +565,24 @@ class X402PaymentMiddleware(BaseHTTPMiddleware):
         if not x402_effective_enabled():
             return await call_next(request)
 
-        # Stripe subscriber bypass: valid key -> no per-call charge.
-        # Invalid/expired key falls through to the normal x402 flow (not an error).
+        # Stripe subscriber bypass: valid key -> no per-call charge, but the
+        # monthly fair-use CREDIT cap still applies (see
+        # billing.record_subscriber_usage). The cost of this call is derived
+        # from the same per-tool price map the x402 flow charges from — no
+        # duplicated price table. The cap covers every subscriber-key-
+        # authenticated call (REST and MCP) because all of them pass through
+        # this middleware. Invalid/expired key falls through to the normal
+        # x402 flow (not an error). x402 per-call payers are never capped.
         sub_key = request.headers.get("x-subscriber-key")
         if sub_key and billing.valid_subscriber_key(sub_key):
+            if path == "/billing/usage":
+                # Read-only usage peek: never deducts, never 429-gated.
+                return await call_next(request)
+            resolved = await _resolve_price(request)
+            cost = price_to_credits(resolved[0]) if resolved is not None else 0.0
+            usage = billing.record_subscriber_usage(sub_key, cost)
+            if not usage["allowed"]:
+                return subscriber_limit_response(usage)
             return await call_next(request)
 
         resolved = await _resolve_price(request)
@@ -669,6 +724,8 @@ __all__ = [
     "FacilitatorUnavailable",
     "payment_required_response",
     "payment_invalid_response",
+    "subscriber_limit_response",
+    "price_to_credits",
     "USDC_BASE_ADDRESS",
     "TOOL_PRICE_DEFAULTS",
 ]
