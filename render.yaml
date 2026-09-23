@@ -6,6 +6,10 @@ services:
     healthCheckPath: /health
     plan: starter
     autoDeploy: true
+    disk:
+      name: billing-data
+      mountPath: /var/lib/price-tracker-mcp
+      sizeGB: 1
     envVars:
       - key: X402_ENABLED
         value: "false"
@@ -38,7 +42,7 @@ services:
       - key: STRIPE_CANCEL_URL
         sync: false
       - key: BILLING_DB_PATH
-        value: "./data/subscribers.db"
+        value: "/var/lib/price-tracker-mcp/billing.db"
       - key: RATE_LIMIT
         value: "60/minute"
       - key: SEARCH_API_KEY

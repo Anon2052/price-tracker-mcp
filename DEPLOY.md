@@ -27,8 +27,23 @@ The service is a single stateless container: FastAPI REST + FastMCP (streamable 
 | `X402_ENABLED` | `false` | **Leave off.** On-chain payment verification is a structural stub, not prod-ready |
 | `RATE_LIMIT` | `60/minute` | e.g. `600/hour` |
 | `X402_PRICE_USDC` / `X402_PAY_TO` | `0.015` / unset | Only relevant when x402 verification is real |
+| `BILLING_DB_PATH` | `/var/lib/price-tracker-mcp/billing.db` | SQLite file for Stripe subscriber keys. Prod default is the persistent-disk mount; override per env |
 
 No secrets are hardcoded in the image. `SEARCH_API_KEY` is supplied at deploy time.
+
+## Subscriber DB: persistent disk (Render)
+
+The Stripe subscriber DB lives on a 1 GB Render persistent disk mounted at
+`/var/lib/price-tracker-mcp`, declared in `render.yaml` via the `disk:` stanza
+(`BILLING_DB_PATH=/var/lib/price-tracker-mcp/billing.db`). Cost:
+**~$0.25/GB/mo** (≈ **$0.25/mo** for the 1 GB disk), billed on provisioned size —
+total service cost becomes **$7.25/mo** ($7 Starter + $0.25 disk).
+
+Render's Blueprint docs say the `disk:` stanza applies to the existing service
+on sync — but disks are billable, so **verify, don't assume**: after the deploy,
+go to Dashboard → **price-tracker-mcp** → **Disk** page. If the disk is missing:
+**Disk → Add disk** → mount path `/var/lib/price-tracker-mcp`, size 1 GB →
+**Add disk** (this triggers a redeploy, then the disk is live).
 
 ## Deploy steps
 

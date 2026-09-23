@@ -24,7 +24,11 @@ The middleware checks ``X-Subscriber-Key`` -> sha256 -> active row -> bypass.
 Invalid/expired keys fall through to the normal x402 flow (not a hard error).
 
 Storage: stdlib ``sqlite3`` at ``BILLING_DB_PATH`` (default
-``./data/subscribers.db``); the parent directory is created on write.
+``/var/lib/price-tracker-mcp/billing.db`` — a Render persistent-disk mount in
+production; override per-env as needed); the parent directory is created on
+write, and table creation is idempotent (``IF NOT EXISTS``) so first boot on
+a fresh disk works. Never ``./data`` in production: Render's filesystem is
+ephemeral, so a relative path would wipe paid subscriber keys on redeploy.
 Payments OFF by default: ``stripe_effective_enabled()`` requires
 ``STRIPE_ENABLED=true`` AND ``STRIPE_SECRET_KEY`` AND ``STRIPE_WEBHOOK_SECRET``
 AND ``STRIPE_PRICE_ID``. Flag on but config incomplete -> ERROR at startup,
@@ -48,6 +52,12 @@ log = logging.getLogger("price_tracker.billing")
 
 router = APIRouter()
 
+# Production default: a Render persistent-disk mount declared in render.yaml
+# (``disk:`` stanza, mountPath ``/var/lib/price-tracker-mcp``). Kept as the
+# code default so a fresh disk boots cleanly; ``BILLING_DB_PATH`` still
+# overrides it when set explicitly (tests, local dev).
+DEFAULT_DB_PATH = "/var/lib/price-tracker-mcp/billing.db"
+
 _SCHEMA = """CREATE TABLE IF NOT EXISTS subscribers (
     key_hash TEXT PRIMARY KEY,
     customer_id TEXT NOT NULL,
@@ -56,6 +66,7 @@ _SCHEMA = """CREATE TABLE IF NOT EXISTS subscribers (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 )"""
+
 
 
 def _env_flag(name: str, default: str = "false") -> bool:
@@ -89,7 +100,13 @@ def stripe_effective_enabled() -> bool:
 
 
 def db_path() -> Path:
-    return Path(os.environ.get("BILLING_DB_PATH", "./data/subscribers.db"))
+    """Resolved subscriber DB path.
+
+    Default is the Render persistent-disk mount (see ``render.yaml`` ``disk:``
+    stanza). Explicitly setting ``BILLING_DB_PATH`` overrides it exactly as
+    before — tests and local dev keep doing that.
+    """
+    return Path(os.environ.get("BILLING_DB_PATH", DEFAULT_DB_PATH))
 
 
 def init_db() -> Path:
