@@ -1,3 +1,4 @@
+# ruff: noqa: E501  (verbatim legal text; long markdown lines are intentional)
 """Public legal documents served verbatim at /legal/*.
 
 Filled-in legal texts for IOConnex LLC (effective September 23, 2026).

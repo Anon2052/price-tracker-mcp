@@ -70,8 +70,18 @@ FACILITATOR_TIMEOUT_SECONDS = 15.0
 DEFAULT_FACILITATOR_URL = "https://x402.org/facilitator"
 
 # Paths that never require payment (health checks, docs, legal pages).
-# Prefix matching covers subpaths, e.g. "/legal" covers /legal/terms.
-EXEMPT_PREFIXES = ("/health", "/docs", "/redoc", "/openapi.json", "/favicon.ico", "/legal")
+# Prefix matching covers subpaths, e.g. "/legal" covers /legal/terms, and
+# "/.well-known" covers the x402 discovery manifest (/.well-known/x402.json),
+# which must stay reachable for directory scans even when x402 is enabled.
+EXEMPT_PREFIXES = (
+    "/health",
+    "/docs",
+    "/redoc",
+    "/openapi.json",
+    "/favicon.ico",
+    "/legal",
+    "/.well-known",
+)
 
 # JSON-RPC methods that stay free (discovery must work for directory scans).
 JSONRPC_DISCOVERY_METHODS = {"initialize", "tools/list", "ping"}
@@ -175,6 +185,59 @@ def price_to_credits(price: Decimal) -> float:
     through automatically.
     """
     return float(round(price / CREDIT_USD, 1))
+
+
+# --------------------------------------------------------------------------
+# Discovery manifest (/.well-known/x402.json)
+
+
+def build_discovery_manifest() -> dict:
+    """Public x402 discovery manifest.
+
+    HONESTY CONTRACT: x402 is implemented but DISABLED until the business
+    entity / Stripe go-live, so this manifest NEVER claims payments are live.
+    ``x402_status`` is ``"implemented_but_disabled"`` whenever
+    ``x402_effective_enabled()`` is False; it only reads otherwise once the
+    flag + recipient + facilitator are all configured and charges can
+    actually be verified. Every price is derived from ``TOOL_PRICE_DEFAULTS``
+    via ``tool_price_usdc()`` — there is deliberately NO duplicated price
+    table here. ``pay_to`` is the live ``X402_PAY_TO`` value or None (never
+    an invented address).
+    """
+    live = x402_effective_enabled()
+    tools: dict[str, dict] = {}
+    for tool in TOOL_PRICE_DEFAULTS:
+        rest_path = next((p for p, t in REST_TOOL_MAP.items() if t == tool), None)
+        tools[tool] = {
+            "price_usdc": str(tool_price_usdc(tool)),
+            "rest_path": rest_path,
+            "description": TOOL_DESCRIPTIONS.get(tool, tool),
+        }
+    return {
+        "x402_status": "accepting_payments" if live else "implemented_but_disabled",
+        "status_note": (
+            "x402 payments are enabled: per-call USDC micropayments on Base "
+            "are verified against the configured facilitator."
+            if live
+            else "x402 payments go live after business entity setup; currently disabled."
+        ),
+        "service": "price-tracker-mcp",
+        "version": X402_VERSION,
+        "payment": {
+            "scheme": SCHEME,
+            "network": NETWORK,
+            "asset": "USDC",
+            "asset_address": USDC_BASE_ADDRESS,
+            "asset_decimals": USDC_DECIMALS,
+            "pay_to": x402_pay_to() or None,
+        },
+        "tools": tools,
+        "legal": {
+            "terms": "/legal/terms",
+            "privacy": "/legal/privacy",
+            "refunds": "/legal/refunds",
+        },
+    }
 
 
 # --------------------------------------------------------------------------
@@ -923,6 +986,7 @@ __all__ = [
     "free_tier_exhausted_response",
     "client_ip",
     "price_to_credits",
+    "build_discovery_manifest",
     "USDC_BASE_ADDRESS",
     "TOOL_PRICE_DEFAULTS",
 ]

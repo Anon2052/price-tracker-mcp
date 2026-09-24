@@ -391,17 +391,22 @@ def test_zero_credit_outcomes_recorded_as_zero(analytics_client):
 
 
 def test_day_boundaries_utc(analytics_client, monkeypatch):
+    # Pin both days explicitly (far-future dates that can never collide with
+    # the real UTC date): the first post must not share a day with the second.
+    monkeypatch.setattr(billing, "_utc_today", lambda: "2030-01-01")
     analytics_client.post(
         "/price", json={"url": "https://example.com/"}, headers=_free_headers(IP_A)
     )
-    monkeypatch.setattr(billing, "_utc_today", lambda: "2026-09-24")
+    monkeypatch.setattr(billing, "_utc_today", lambda: "2030-01-02")
     analytics_client.post(
         "/price", json={"url": "https://example.com/"}, headers=_free_headers(IP_A)
     )
     stats = billing.get_usage_stats(7)
     by_date = {d["date"]: d["tools"] for d in stats["days"]}
-    assert "2026-09-24" in by_date
-    assert by_date["2026-09-24"]["check_price"]["free"] == {"calls": 1, "credits": 2.0}
+    assert "2030-01-01" in by_date
+    assert "2030-01-02" in by_date
+    assert by_date["2030-01-01"]["check_price"]["free"] == {"calls": 1, "credits": 2.0}
+    assert by_date["2030-01-02"]["check_price"]["free"] == {"calls": 1, "credits": 2.0}
 
 
 def test_denied_calls_not_recorded(analytics_client, monkeypatch):

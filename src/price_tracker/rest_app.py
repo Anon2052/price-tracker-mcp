@@ -22,6 +22,7 @@ from starlette.routing import Route
 from . import __version__
 from . import affiliate as _affiliate
 from . import price as _price
+from . import x402 as x402_mod
 from .affiliate import AffiliateError
 from .billing import router as billing_router
 from .billing import stripe_effective_enabled
@@ -137,6 +138,17 @@ def create_app(rate_limit: str | None = None) -> FastAPI:
     @app.get("/legal/refunds", include_in_schema=False)
     async def legal_refunds():
         return Response(content=REFUND_POLICY, media_type="text/markdown; charset=utf-8")
+
+    # --- x402 discovery manifest: public, always free -----------------------
+    # No @limiter.limit on this route: discovery must never 429. The
+    # "/.well-known" prefix in EXEMPT_PREFIXES keeps the x402 middleware from
+    # ever 402-challenging it, even when x402 payments are effectively
+    # enabled. Built at request time from build_discovery_manifest() so
+    # prices always reflect the live single source of truth (TOOL_PRICE_
+    # DEFAULTS + X402_PRICE_*_USDC env overrides).
+    @app.get("/.well-known/x402.json", include_in_schema=False)
+    async def x402_discovery_manifest():
+        return x402_mod.build_discovery_manifest()
 
     @app.post("/price")
     @limiter.limit(limit)
