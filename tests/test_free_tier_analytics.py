@@ -1,5 +1,6 @@
 """Tests for the monthly free credit tier and the usage-analytics rollups.
 
+
 Free tier (workstream A):
 - Monthly free bucket ``FREE_MONTHLY_CREDITS`` (default 50), keyed by client
   IP from ``X-Forwarded-For`` (first entry). No key, no payment required.
@@ -9,7 +10,8 @@ Free tier (workstream A):
   untouched) -> X-Payment present -> x402 flow (exempt from the bucket) ->
   free bucket -> 402. REST + MCP share the hook.
 - Exhausted bucket -> 402 ``free_tier_exhausted`` (NOT 429), with
-  credits_used / free_limit / resets_at / upgrade_hint.
+  credits_used / free_limit / resets_at plus the canonical x402 challenge
+  (the subscribe upgrade path is spelled out in ``message``).
 - Denied/exhausted calls never consume credits. ``FREE_TIER_ENABLED=0``
   skips the free path entirely (straight to the x402 402).
 
@@ -40,6 +42,14 @@ from .test_payments import (
     _x_payment_header,
 )
 
+
+@pytest.fixture(autouse=True)
+def _isolated_billing_db(monkeypatch, tmp_path):
+    """M-1: the replay table is persistent — point every test at a scratch
+    DB so claims can never leak between tests (or touch the real path)."""
+    monkeypatch.setenv("BILLING_DB_PATH", str(tmp_path / "billing.db"))
+
+
 PAY_TO = "0xAbC1230000000000000000000000000000000000"
 IP_A = "10.0.0.1"
 IP_B = "10.0.0.2"
@@ -69,7 +79,7 @@ def free_client(monkeypatch, tmp_path):
 
 
 def test_free_bucket_deducts_per_price(free_client):
-    for _ in range(2):  # check_price $0.02 -> 2.0 credits each
+    for _ in range(5):  # check_price $0.008 -> 0.8 credits each; 5 x 0.8 = 4.0
         r = free_client.post(
             "/price", json={"url": "https://example.com/"}, headers=_free_headers()
         )
@@ -82,7 +92,7 @@ def test_free_bucket_deducts_per_price(free_client):
 
 def test_free_bucket_uses_same_price_map_as_x402(monkeypatch):
     """No duplicated price table: the deduction derives from tool_price_usdc."""
-    assert x402_mod.price_to_credits(x402_mod.tool_price_usdc("check_price")) == 2.0
+    assert x402_mod.price_to_credits(x402_mod.tool_price_usdc("check_price")) == 0.8
     assert x402_mod.price_to_credits(x402_mod.tool_price_usdc("make_affiliate_link")) == 0.5
 
 
@@ -124,7 +134,7 @@ def test_affiliate_deducts_fractional_credits(free_client):
 
 def test_exhaustion_returns_402_with_fields(free_client):
     headers = _free_headers()
-    for _ in range(2):
+    for _ in range(5):  # 5 x 0.8 = 4.0: bucket exhausted
         free_client.post("/price", json={"url": "https://example.com/"}, headers=headers)
     r = free_client.post("/price", json={"url": "https://example.com/"}, headers=headers)
     assert r.status_code == 402, r.text
@@ -136,14 +146,13 @@ def test_exhaustion_returns_402_with_fields(free_client):
     assert body["resets_at"].endswith("-01T00:00:00Z")
     # Actionable: the x402 challenge is embedded and the upgrade path spelled out.
     assert "paymentRequirements" in body
-    assert "upgrade_hint" in body
-    assert "x402" in body["upgrade_hint"]
-    assert "$9/mo" in body["upgrade_hint"]
+    assert "$9/mo" in body["message"]
+    assert "x402" in body["message"]
 
 
 def test_exhausted_calls_never_consume_credits(free_client):
     headers = _free_headers()
-    for _ in range(2):
+    for _ in range(5):  # 5 x 0.8 = 4.0: bucket exhausted
         free_client.post("/price", json={"url": "https://example.com/"}, headers=headers)
     for _ in range(3):
         r = free_client.post("/price", json={"url": "https://example.com/"}, headers=headers)
@@ -154,7 +163,7 @@ def test_exhausted_calls_never_consume_credits(free_client):
 
 def test_month_reset_refills_bucket(free_client, monkeypatch):
     headers = _free_headers()
-    for _ in range(2):
+    for _ in range(5):  # 5 x 0.8 = 4.0: bucket exhausted
         free_client.post("/price", json={"url": "https://example.com/"}, headers=headers)
     assert (
         free_client.post(
@@ -162,19 +171,23 @@ def test_month_reset_refills_bucket(free_client, monkeypatch):
         ).status_code
         == 402
     )
-    # New calendar month (UTC): the same IP is served again.
-    monkeypatch.setattr(billing, "current_month", lambda: "2026-10")
+    # New calendar month (UTC): the same IP is served again. Computed from the
+    # real month so the test can't go stale when the calendar turns.
+    real = billing.current_month()
+    year, mon = int(real[:4]), int(real[5:7])
+    nxt = f"{year + (mon == 12):04d}-{mon % 12 + 1:02d}"
+    monkeypatch.setattr(billing, "current_month", lambda: nxt)
     r = free_client.post("/price", json={"url": "https://example.com/"}, headers=headers)
     assert r.status_code in (200, 422), r.text
-    assert billing.get_free_tier_usage(IP_A)["credits_used"] == 2.0
-    assert billing.get_free_tier_usage(IP_A)["period"] == "2026-10"
+    assert billing.get_free_tier_usage(IP_A)["credits_used"] == 0.8
+    assert billing.get_free_tier_usage(IP_A)["period"] == nxt
 
 
 # ------------------------------------------------- free tier: IP keying
 
 
 def test_separate_buckets_per_ip(free_client):
-    for _ in range(2):
+    for _ in range(5):  # 5 x 0.8 = 4.0: IP_A's bucket exhausted
         free_client.post(
             "/price", json={"url": "https://example.com/"}, headers=_free_headers(IP_A)
         )
@@ -187,11 +200,11 @@ def test_separate_buckets_per_ip(free_client):
         "/price", json={"url": "https://example.com/"}, headers=_free_headers(IP_B)
     )
     assert r.status_code in (200, 422), r.text
-    assert billing.get_free_tier_usage(IP_B)["credits_used"] == 2.0
+    assert billing.get_free_tier_usage(IP_B)["credits_used"] == 0.8
 
 
 def test_x_forwarded_for_first_entry_wins(free_client):
-    for _ in range(2):
+    for _ in range(5):  # 5 x 0.8 = 4.0: IP_A's bucket exhausted
         free_client.post(
             "/price", json={"url": "https://example.com/"}, headers=_free_headers(IP_A)
         )
@@ -229,7 +242,7 @@ def test_free_tier_disabled_falls_straight_to_402(monkeypatch, tmp_path):
     assert r.status_code == 402
     body = r.json()
     assert body["error"] == "payment_required"  # the plain x402 challenge
-    assert "upgrade_hint" in body  # directs to x402 or subscribe
+    assert "paymentRequirements" in body  # full challenge attached
     # The free path was skipped entirely: no bucket row, no deduction.
     assert billing.get_free_tier_usage(IP_A)["credits_used"] == 0.0
 
@@ -253,9 +266,10 @@ def test_mcp_tools_call_shares_bucket(free_client):
     }
     r = free_client.post("/mcp", json=body, headers=_free_headers())
     assert r.status_code == 200, r.text  # served from the free bucket
-    assert billing.get_free_tier_usage(IP_A)["credits_used"] == 2.0
-    # Same bucket as REST: one more REST call spends it.
-    free_client.post("/price", json={"url": "https://example.com/"}, headers=_free_headers())
+    assert billing.get_free_tier_usage(IP_A)["credits_used"] == 0.8
+    # Same bucket as REST: four more REST calls spend it (5 x 0.8 = 4.0).
+    for _ in range(4):
+        free_client.post("/price", json={"url": "https://example.com/"}, headers=_free_headers())
     r = free_client.post("/price", json={"url": "https://example.com/"}, headers=_free_headers())
     assert r.status_code == 402
     assert r.json()["error"] == "free_tier_exhausted"
@@ -270,7 +284,7 @@ def test_subscriber_path_unaffected(free_client, monkeypatch):
     monkeypatch.setenv("SUBSCRIBER_MONTHLY_CREDIT_LIMIT", "4")
     token = billing.create_subscriber("cus_free1", None)
     headers = {"X-Subscriber-Key": token, "X-Forwarded-For": IP_A}
-    for _ in range(2):
+    for _ in range(5):  # 5 x 0.8 = 4.0: exactly the subscriber cap
         r = free_client.post("/price", json={"url": "https://example.com/"}, headers=headers)
         assert r.status_code in (200, 422), r.text
     # The free bucket was NOT touched by subscriber-keyed calls.
@@ -308,7 +322,7 @@ def test_invalid_subscriber_key_falls_through_to_free(free_client):
         headers={"X-Subscriber-Key": "bogus", "X-Forwarded-For": IP_A},
     )
     assert r.status_code in (200, 422), r.text
-    assert billing.get_free_tier_usage(IP_A)["credits_used"] == 2.0
+    assert billing.get_free_tier_usage(IP_A)["credits_used"] == 0.8
 
 
 # ------------------------------------------------- analytics: rollups
@@ -355,13 +369,13 @@ def test_rollup_increments_across_plan_types(analytics_client):
     )
     stats = billing.get_usage_stats(1)
     tools = stats["days"][0]["tools"]["check_price"]
-    assert tools["free"] == {"calls": 1, "credits": 2.0}
-    assert tools["subscriber"] == {"calls": 1, "credits": 2.0}
-    assert tools["x402"] == {"calls": 1, "credits": 2.0}
+    assert tools["free"] == {"calls": 1, "credits": 0.8}
+    assert tools["subscriber"] == {"calls": 1, "credits": 0.8}
+    assert tools["x402"] == {"calls": 1, "credits": 0.8}
     totals = stats["totals"]
-    assert totals["free"] == {"calls": 1, "credits": 2.0}
-    assert totals["subscriber"] == {"calls": 1, "credits": 2.0}
-    assert totals["x402"] == {"calls": 1, "credits": 2.0}
+    assert totals["free"] == {"calls": 1, "credits": 0.8}
+    assert totals["subscriber"] == {"calls": 1, "credits": 0.8}
+    assert totals["x402"] == {"calls": 1, "credits": 0.8}
 
 
 def test_multi_tool_separation(analytics_client):
@@ -376,7 +390,7 @@ def test_multi_tool_separation(analytics_client):
     stats = billing.get_usage_stats(1)
     tools = stats["days"][0]["tools"]
     assert set(tools) == {"check_price", "make_affiliate_link"}
-    assert tools["check_price"]["free"] == {"calls": 1, "credits": 2.0}
+    assert tools["check_price"]["free"] == {"calls": 1, "credits": 0.8}
     assert tools["make_affiliate_link"]["free"] == {"calls": 1, "credits": 0.5}
 
 
@@ -405,14 +419,16 @@ def test_day_boundaries_utc(analytics_client, monkeypatch):
     by_date = {d["date"]: d["tools"] for d in stats["days"]}
     assert "2030-01-01" in by_date
     assert "2030-01-02" in by_date
-    assert by_date["2030-01-01"]["check_price"]["free"] == {"calls": 1, "credits": 2.0}
-    assert by_date["2030-01-02"]["check_price"]["free"] == {"calls": 1, "credits": 2.0}
+    assert by_date["2030-01-01"]["check_price"]["free"] == {"calls": 1, "credits": 0.8}
+    assert by_date["2030-01-02"]["check_price"]["free"] == {"calls": 1, "credits": 0.8}
 
 
 def test_denied_calls_not_recorded(analytics_client, monkeypatch):
     """429s (subscriber cap) and exhausted-bucket 402s are not served calls."""
-    monkeypatch.setenv("FREE_MONTHLY_CREDITS", "2")
-    monkeypatch.setenv("SUBSCRIBER_MONTHLY_CREDIT_LIMIT", "2")
+    # One check_price call = 0.8 credits: exactly each cap, so the second
+    # call of each kind is denied.
+    monkeypatch.setenv("FREE_MONTHLY_CREDITS", "0.8")
+    monkeypatch.setenv("SUBSCRIBER_MONTHLY_CREDIT_LIMIT", "0.8")
     token = billing.create_subscriber("cus_stats2", None)
     sub_headers = {"X-Subscriber-Key": token, "X-Forwarded-For": IP_A}
     # Spend both buckets once, then hit both denials.
@@ -434,8 +450,8 @@ def test_denied_calls_not_recorded(analytics_client, monkeypatch):
     )
     stats = billing.get_usage_stats(1)
     tools = stats["days"][0]["tools"]["check_price"]
-    assert tools["subscriber"] == {"calls": 1, "credits": 2.0}
-    assert tools["free"] == {"calls": 1, "credits": 2.0}
+    assert tools["subscriber"] == {"calls": 1, "credits": 0.8}
+    assert tools["free"] == {"calls": 1, "credits": 0.8}
 
 
 def test_no_pii_in_rollups(analytics_client):
@@ -464,9 +480,9 @@ def test_stats_endpoint_shape(analytics_client):
         assert set(day) == {"date", "tools"}
     today = body["days"][-1]
     assert set(today["tools"]["check_price"]) == {"free", "subscriber", "x402"}
-    assert today["tools"]["check_price"]["free"] == {"calls": 1, "credits": 2.0}
+    assert today["tools"]["check_price"]["free"] == {"calls": 1, "credits": 0.8}
     assert set(body["totals"]) == {"free", "subscriber", "x402"}
-    assert body["totals"]["free"] == {"calls": 1, "credits": 2.0}
+    assert body["totals"]["free"] == {"calls": 1, "credits": 0.8}
 
 
 def test_stats_auth_header_and_query_param(analytics_client):
@@ -529,3 +545,33 @@ def test_record_usage_rollup_rejects_unknown_plan(monkeypatch, tmp_path):
     monkeypatch.setenv("BILLING_DB_PATH", str(tmp_path / "bad.db"))
     with pytest.raises(ValueError):
         billing.record_usage_rollup("check_price", "platinum", 1.0)
+
+
+# ---------------------------------------------------------- always-paid alias
+
+
+def test_paid_alias_unpaid_402s_and_never_touches_bucket(free_client):
+    """Paid-route batch: /paid/price 402s a first-time unpaid caller
+    (the directory-checker probe case) instead of serving from the free
+    bucket, and the main route still serves free afterwards."""
+    r = free_client.post(
+        "/paid/price", json={"url": "https://example.com/"}, headers=_free_headers()
+    )
+    assert r.status_code == 402
+    assert r.json()["error"] == "payment_required"
+    assert billing.get_free_tier_usage(IP_A)["credits_used"] == 0.0
+    r = free_client.post("/price", json={"url": "https://example.com/"}, headers=_free_headers())
+    assert r.status_code in (200, 422), r.text
+
+
+def test_paid_alias_serves_valid_payment(free_client, monkeypatch):
+    """The alias is always-paid, not a wall: a verified X-Payment serves
+    it at the same price, without touching the free bucket."""
+    _mock_facilitator(monkeypatch)
+    r = free_client.post(
+        "/paid/price",
+        json={"url": "https://example.com/"},
+        headers={**_free_headers(), **_x_payment_header(signature="0xPaidAlias1")},
+    )
+    assert r.status_code in (200, 422), r.text
+    assert billing.get_free_tier_usage(IP_A)["credits_used"] == 0.0

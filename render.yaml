@@ -45,13 +45,45 @@ services:
         value: "/var/lib/price-tracker-mcp/billing.db"
       - key: SUBSCRIBER_MONTHLY_CREDIT_LIMIT
         value: "1000"
-      - key: FREE_TIER_ENABLED
-        value: "true"
-      - key: FREE_MONTHLY_CREDITS
-        value: "50"
-      - key: ADMIN_KEY
-        sync: false
       - key: RATE_LIMIT
         value: "60/minute"
       - key: SEARCH_API_KEY
+        sync: false
+      # Price Tracker v2 Tier A source keys (find_best_price). Each source
+      # stays dark until its key is set; none are required for deploy.
+      - key: BESTBUY_API_KEY
+        sync: false
+      - key: WALMART_CONSUMER_ID
+        sync: false
+      - key: WALMART_PRIVATE_KEY
+        sync: false
+      - key: WALMART_KEY_VERSION
+        sync: false
+      - key: EBAY_CLIENT_ID
+        sync: false
+      - key: EBAY_CLIENT_SECRET
+        sync: false
+      # Broker layer (find_best_price path="broker"): affiliate PROGRAM
+      # enrollment per retailer — separate from the API keys above. The
+      # TAG var's presence is the enrollment signal; PARAM overrides the
+      # program's tag parameter name; RATE is the program-published
+      # commission disclosed in broker responses. All stay unset until
+      # each retailer's affiliate program approves (just-in-time).
+      - key: BESTBUY_AFFILIATE_TAG
+        sync: false
+      - key: BESTBUY_AFFILIATE_PARAM
+        sync: false
+      - key: BESTBUY_AFFILIATE_RATE
+        sync: false
+      - key: WALMART_AFFILIATE_TAG
+        sync: false
+      - key: WALMART_AFFILIATE_PARAM
+        sync: false
+      - key: WALMART_AFFILIATE_RATE
+        sync: false
+      - key: EBAY_AFFILIATE_TAG
+        sync: false
+      - key: EBAY_AFFILIATE_PARAM
+        sync: false
+      - key: EBAY_AFFILIATE_RATE
         sync: false

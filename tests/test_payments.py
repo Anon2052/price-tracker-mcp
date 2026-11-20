@@ -17,7 +17,14 @@ from price_tracker.rest_app import create_app
 
 PAY_TO = "0xAbC1230000000000000000000000000000000000"
 PAYER = "0xDeF4560000000000000000000000000000000000"
-USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA38bD"
+USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+
+
+@pytest.fixture(autouse=True)
+def _isolated_billing_db(monkeypatch, tmp_path):
+    """M-1: the replay table is persistent — point every test at a scratch
+    DB so claims can never leak between tests (or touch the real path)."""
+    monkeypatch.setenv("BILLING_DB_PATH", str(tmp_path / "billing.db"))
 
 
 # ------------------------------------------------------------------ helpers
@@ -59,7 +66,7 @@ def _x_payment_header(
                 "to": to,
                 "value": value,
                 "validAfter": str(valid_after if valid_after is not None else now - 60),
-                "validBefore": str(valid_before if valid_before is not None else now + 300),
+                "validBefore": str(valid_before if valid_before is not None else now + 240),
                 "nonce": "0xnonce1",
             },
         },
@@ -123,8 +130,42 @@ def test_402_challenge_shape(priced_app):
     assert reqs["asset"] == USDC
     assert reqs["network"] == "base"
     assert reqs["payTo"] == PAY_TO
-    # check_price default $0.02 -> 20000 atomic units
-    assert reqs["maxAmountRequired"] == "20000"
+    # check_price default $0.008 -> 8000 atomic units
+    assert reqs["maxAmountRequired"] == "8000"
+
+
+def test_402_canonical_shape(priced_app):
+    """The 402 body uses the canonical cross-repo shape: error/message/
+    accepts/paymentRequirements, with reason present on rejections."""
+    # Bare challenge: no reason key when there is no rejection detail.
+    r = priced_app.post("/price", json={"url": "https://example.com/"})
+    assert r.status_code == 402
+    body = r.json()
+    assert body["error"] == "payment_required"
+    assert "x402 USDC micropayment" in body["message"]
+    assert "reason" not in body
+    assert body["accepts"] == {
+        "asset": "USDC",
+        "asset_contract": USDC,
+        "network": "base",
+        "amount_usdc": "0.008",
+        "amount_atomic": "8000",
+        "pay_to": PAY_TO,
+        "scheme": "exact",
+    }
+    assert body["paymentRequirements"]["maxAmountRequired"] == "8000"
+
+    # Rejection: reason present, challenge still attached.
+    r = priced_app.post(
+        "/price",
+        json={"url": "https://example.com/"},
+        headers=_x_payment_header(network="ethereum"),
+    )
+    assert r.status_code == 402
+    body = r.json()
+    assert body["error"] == "payment_invalid"
+    assert body["reason"] == 'unsupported network (want "base")'
+    assert "paymentRequirements" in body
 
 
 def test_per_tool_pricing_env_override(monkeypatch, tmp_path):
@@ -146,7 +187,7 @@ def test_invalid_price_env_falls_back_to_default(monkeypatch, tmp_path):
     c = TestClient(create_app())
     r = c.post("/price", json={"url": "https://example.com/"})
     assert r.status_code == 402
-    assert r.json()["paymentRequirements"]["maxAmountRequired"] == "20000"
+    assert r.json()["paymentRequirements"]["maxAmountRequired"] == "8000"
 
 
 def test_jsonrpc_discovery_exempt(priced_app):
@@ -163,7 +204,7 @@ def test_jsonrpc_tools_call_is_paid(priced_app):
     }
     r = priced_app.post("/mcp", json=body)
     assert r.status_code == 402
-    assert r.json()["paymentRequirements"]["maxAmountRequired"] == "20000"
+    assert r.json()["paymentRequirements"]["maxAmountRequired"] == "8000"
 
 
 # ------------------------------------------------- decode + sanity checks
@@ -182,7 +223,7 @@ def test_bad_base64_gets_challenge(priced_app, monkeypatch):
     "kwargs",
     [
         {"to": "0xWrong000000000000000000000000000000000000"},
-        {"value": "1"},  # below 20000 atomic required
+        {"value": "1"},  # below 8000 atomic required
         {"network": "ethereum"},
         {"scheme": "upto"},
         {"version": 2},
@@ -192,7 +233,7 @@ def test_sanity_failures_402(priced_app, monkeypatch, kwargs):
     _mock_facilitator(monkeypatch)
     now = int(time.time())
     if "valid_before" not in kwargs:
-        kwargs = dict(kwargs, valid_before=now + 300)
+        kwargs = dict(kwargs, valid_before=now + 240)
     r = priced_app.post(
         "/price", json={"url": "https://example.com/"}, headers=_x_payment_header(**kwargs)
     )
@@ -227,7 +268,7 @@ def test_verify_false_402_with_reason(priced_app, monkeypatch):
     r = priced_app.post("/price", json={"url": "https://example.com/"}, headers=_x_payment_header())
     assert r.status_code == 402
     assert r.json()["error"] == "payment_invalid"
-    assert "bad signature" in r.json()["message"]
+    assert r.json()["reason"] == "bad signature"
 
 
 def test_verify_true_serves_and_settles(priced_app, monkeypatch, caplog):
@@ -402,7 +443,8 @@ def test_webhook_completed_creates_subscriber_hashed(monkeypatch, tmp_path):
         {
             "id": "evt_1",
             "type": "checkout.session.completed",
-            "data": {"object": {"customer": "cus_123", "customer_details": {"email": "a@b.c"}}},
+            "data": {"object": {"customer": "cus_123", "mode": "subscription",
+                          "customer_details": {"email": "a@b.c"}}},
         }
     ).encode()
     r = c.post(
@@ -451,9 +493,12 @@ def test_billing_key_exchanges_paid_session(monkeypatch, tmp_path):
         return {
             "id": "cs_test_1",
             "status": "complete",
+            "mode": "subscription",
             "payment_status": "paid",
             "customer": "cus_key2",
             "customer_details": {"email": "k2@e.y"},
+            # M-2: the session must carry a line item for the configured price.
+            "line_items": {"data": [{"price": {"id": "price_test_123"}}]},
         }
 
     monkeypatch.setattr(stripe.checkout.Session, "retrieve", fake_retrieve)

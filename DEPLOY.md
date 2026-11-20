@@ -29,6 +29,12 @@ The service is a single stateless container: FastAPI REST + FastMCP (streamable 
 | `X402_PRICE_USDC` / `X402_PAY_TO` | `0.015` / unset | Only relevant when x402 verification is real |
 | `BILLING_DB_PATH` | `/var/lib/price-tracker-mcp/billing.db` | SQLite file for Stripe subscriber keys. Prod default is the persistent-disk mount; override per env |
 | `SUBSCRIBER_MONTHLY_CREDIT_LIMIT` | `1000` | Fair-use credit cap per Pro subscriber per calendar month (UTC). $9/mo includes $10 of API calls (1 credit = $0.01 of x402 list price). Business call — Scott's to tune (see PR body) |
+| `BESTBUY_API_KEY` | unset | Price Tracker v2 Tier A: Best Buy Products API key (free, developer.bestbuy.com). Source stays dark until set |
+| `WALMART_CONSUMER_ID` / `WALMART_PRIVATE_KEY` / `WALMART_KEY_VERSION` | unset | Price Tracker v2 Tier A: Walmart Affiliate API credentials (walmart.io). All three required; source stays dark until set |
+| `EBAY_CLIENT_ID` / `EBAY_CLIENT_SECRET` | unset | Price Tracker v2 Tier A: eBay developer app credentials for the Browse API. Both required; source stays dark until set |
+| `BESTBUY_AFFILIATE_TAG` / `WALMART_AFFILIATE_TAG` / `EBAY_AFFILIATE_TAG` | unset | Broker layer: affiliate program tag/ID per retailer. Set = enrolled in that program (a separate approval from the API key above); until set, broker-path links for that retailer stay plain with `affiliate: false` |
+| `<RETAILER>_AFFILIATE_PARAM` / `<RETAILER>_AFFILIATE_RATE` | unset | Broker layer (optional): tag query-parameter override / the program's published commission rate, disclosed verbatim in broker responses |
+| `X402_PRICE_FIND_BEST_PRICE_USDC` | `0.03` | Price Tracker v2: per-call price override for `find_best_price` (spec price $0.03) |
 
 No secrets are hardcoded in the image. `SEARCH_API_KEY` is supplied at deploy time.
 

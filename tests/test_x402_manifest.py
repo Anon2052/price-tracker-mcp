@@ -77,7 +77,7 @@ def test_manifest_free_even_when_x402_effectively_enabled(client, monkeypatch):
     # With x402 fully enabled the middleware is armed, but the manifest must
     # still be free (never 402) and its prices unchanged.
     monkeypatch.setenv("X402_ENABLED", "true")
-    monkeypatch.setenv("X402_PAY_TO", "0xAbC123")
+    monkeypatch.setenv("X402_PAY_TO", "0xAbC1230000000000000000000000000000000000")
     monkeypatch.setenv("X402_FACILITATOR_URL", "https://x402.org/facilitator")
     assert x402_mod.x402_effective_enabled()
     c = TestClient(create_app())

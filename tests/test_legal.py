@@ -33,12 +33,12 @@ def test_legal_routes_serve_verbatim_markdown(client):
         assert heading in r.text, path
         # Filled-in legal identity: proves the served doc is the final version.
         assert "IOConnex LLC" in r.text, path
-        assert "scogg3@gmail.com" in r.text, path
+        assert "hello@ioconnex.dev" in r.text, path
 
 
 def test_legal_routes_never_402_when_x402_enabled(monkeypatch):
     monkeypatch.setenv("X402_ENABLED", "true")
-    monkeypatch.setenv("X402_PAY_TO", "0xAbC123")
+    monkeypatch.setenv("X402_PAY_TO", "0xAbC1230000000000000000000000000000000000")
     monkeypatch.setenv("X402_FACILITATOR_URL", "https://example.com/facilitator")
     # Free tier pinned off so the unpaid proof-of-enforcement call below hits
     # the pure x402 402 challenge instead of the free bucket.
