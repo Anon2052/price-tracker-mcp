@@ -64,8 +64,7 @@ def _client_ip_from_scope(scope) -> str:  # noqa: ANN001, ANN202
     because the header is honored only for verifiably Cloudflare peers.
     """
     headers = {
-        k.decode("latin-1").lower(): v.decode("latin-1")
-        for k, v in scope.get("headers", [])
+        k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])
     }
     client = scope.get("client")
     peer = client[0] if client else ""
@@ -335,9 +334,7 @@ def create_app(rate_limit: str | None = None) -> FastAPI:
         video_path = os.environ.get("DEMO_VIDEO_PATH", "/app/demo-walkthrough.mp4")
         if not os.path.isfile(video_path):
             return Response(status_code=404, content="not found", media_type="text/plain")
-        return FileResponse(
-            video_path, media_type="video/mp4", filename="demo-walkthrough.mp4"
-        )
+        return FileResponse(video_path, media_type="video/mp4", filename="demo-walkthrough.mp4")
 
     # --- x402 discovery manifest: public, always free -----------------------
     # No @limiter.limit on this route: discovery must never 429. The

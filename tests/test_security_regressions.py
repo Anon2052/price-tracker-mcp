@@ -170,9 +170,7 @@ def _asgi_scope(*, peer, xff=None, cf_ip=None):
 def test_cf_connecting_ip_honored_from_cloudflare_peer():
     """CF-Connecting-IP is trusted when the TCP peer is a Cloudflare edge
     IP (proxied DNS). 172.64.1.10 is inside 172.64.0.0/13."""
-    key = rest_app_mod._client_ip_from_scope(
-        _asgi_scope(peer="172.64.1.10", cf_ip="8.8.8.8")
-    )
+    key = rest_app_mod._client_ip_from_scope(_asgi_scope(peer="172.64.1.10", cf_ip="8.8.8.8"))
     assert key == "8.8.8.8"
 
 
@@ -187,18 +185,14 @@ def test_cf_connecting_ip_honored_from_cloudflare_ipv6_peer():
 def test_cf_connecting_ip_ignored_from_non_cloudflare_peer():
     """A spoofed CF-Connecting-IP from a direct (non-Cloudflare) peer is
     ignored — falls back to existing direct-connection logic (XFF ignored)."""
-    key = rest_app_mod._client_ip_from_scope(
-        _asgi_scope(peer="8.8.8.8", cf_ip="1.2.3.4")
-    )
+    key = rest_app_mod._client_ip_from_scope(_asgi_scope(peer="8.8.8.8", cf_ip="1.2.3.4"))
     assert key == "8.8.8.8"
 
 
 def test_cf_connecting_ip_garbage_falls_back_to_peer():
     """Garbage CF-Connecting-IP from a Cloudflare peer falls back to the
     peer instead of poisoning the rate-limit bucket."""
-    key = rest_app_mod._client_ip_from_scope(
-        _asgi_scope(peer="172.64.1.10", cf_ip="not-an-ip")
-    )
+    key = rest_app_mod._client_ip_from_scope(_asgi_scope(peer="172.64.1.10", cf_ip="not-an-ip"))
     assert key == "172.64.1.10"
 
 
@@ -206,9 +200,7 @@ def test_cf_peer_without_cf_header_ignores_xff():
     """Cloudflare peer with no CF-Connecting-IP: XFF is NOT trusted (first
     XFF entry is client-spoofable through Cloudflare) — falls back to the
     peer, same as any global peer."""
-    key = rest_app_mod._client_ip_from_scope(
-        _asgi_scope(peer="172.64.1.10", xff="8.8.8.8")
-    )
+    key = rest_app_mod._client_ip_from_scope(_asgi_scope(peer="172.64.1.10", xff="8.8.8.8"))
     assert key == "172.64.1.10"
 
 

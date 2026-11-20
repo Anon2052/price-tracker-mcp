@@ -796,9 +796,7 @@ def billing_key(session_id: str):
     _require_enabled()
     _stripe_api()
     try:
-        session = stripe.checkout.Session.retrieve(
-            session_id, expand=["customer", "line_items"]
-        )
+        session = stripe.checkout.Session.retrieve(session_id, expand=["customer", "line_items"])
     except stripe.error.StripeError as exc:
         raise HTTPException(status_code=400, detail="unknown checkout session") from exc
     session = _to_plain_dict(session)

@@ -443,8 +443,13 @@ def test_webhook_completed_creates_subscriber_hashed(monkeypatch, tmp_path):
         {
             "id": "evt_1",
             "type": "checkout.session.completed",
-            "data": {"object": {"customer": "cus_123", "mode": "subscription",
-                          "customer_details": {"email": "a@b.c"}}},
+            "data": {
+                "object": {
+                    "customer": "cus_123",
+                    "mode": "subscription",
+                    "customer_details": {"email": "a@b.c"},
+                }
+            },
         }
     ).encode()
     r = c.post(
