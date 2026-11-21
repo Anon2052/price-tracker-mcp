@@ -7,15 +7,16 @@ name = "price-tracker-mcp"
 version = "0.1.0"
 description = "Price tracking MCP server (streamable HTTP) + REST API: check_price (SSRF-guarded price extraction) and make_affiliate_link."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
-    "fastmcp==4.0.5",
+    "fastmcp==4.1.2",
     "fastapi==0.141.1",
     "uvicorn==0.53.0",
     "slowapi==0.1.10",
     "httpx==0.28.1",
     "beautifulsoup4==4.14.3",
+    "pyyaml==6.0.3",
     "stripe==15.6.1",
     "cryptography==50.0.1",
 ]
@@ -36,11 +37,6 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
-
-# legal_docs.py embeds the legal templates verbatim (long markdown lines are
-# intentional — the served text must match the source documents byte-for-byte).
-[tool.ruff.lint.per-file-ignores]
-"src/price_tracker/legal_docs.py" = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

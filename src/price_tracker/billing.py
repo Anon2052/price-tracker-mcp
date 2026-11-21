@@ -101,6 +101,13 @@ _USAGE_SCHEMA = """CREATE TABLE IF NOT EXISTS subscriber_usage (
     credits REAL NOT NULL DEFAULT 0
 )"""
 
+# M-1: persistent x402 anti-replay claims. Survives restarts and is shared
+# across workers, closing the gaps of the old in-memory signature cache.
+_REPLAY_SCHEMA = """CREATE TABLE IF NOT EXISTS x402_seen_signatures (
+    signature TEXT PRIMARY KEY,
+    expires_at REAL NOT NULL
+)"""
+
 
 def _ensure_usage_columns() -> None:
     """Add the ``credits`` column to pre-credit ``subscriber_usage`` tables.
@@ -177,9 +184,39 @@ def init_db() -> Path:
         conn.execute(_USAGE_SCHEMA)
         conn.execute(_FREE_TIER_SCHEMA)
         conn.execute(_USAGE_DAILY_SCHEMA)
+        conn.execute(_REPLAY_SCHEMA)
         conn.commit()
     _ensure_usage_columns()
     return path
+
+
+def claim_x402_signature(signature: str, expires_at: float) -> bool:
+    """Atomically claim an x402 payment signature (M-1 anti-replay).
+
+    Returns True when the signature was already claimed and has not expired
+    (a replay); False when this call claimed it. The claim is atomic
+    (INSERT PRIMARY KEY): concurrent duplicate submissions across the
+    facilitator-verify gap collapse to a single serve. Expired rows are
+    pruned opportunistically. An expired row can never mask a live
+    authorization: the sanity check bounds the validity window to
+    <= MAX_TIMEOUT_SECONDS <= the claim TTL, so a row only expires after
+    its authorization is already invalid.
+    """
+    init_db()
+    with sqlite3.connect(db_path()) as conn:
+        try:
+            conn.execute(
+                "INSERT INTO x402_seen_signatures (signature, expires_at) VALUES (?, ?)",
+                (signature, expires_at),
+            )
+        except sqlite3.IntegrityError:
+            return True
+        conn.execute(
+            "DELETE FROM x402_seen_signatures WHERE expires_at <= ?",
+            (time.time(),),
+        )
+        conn.commit()
+        return False
 
 
 def _now_iso() -> str:
@@ -679,6 +716,13 @@ def billing_checkout():
 @router.post("/billing/stripe-webhook")
 async def stripe_webhook(request: Request):
     _require_enabled()
+    # Stripe events are a few KB; refuse absurd bodies before buffering them.
+    try:
+        declared = int(request.headers.get("content-length", "0"))
+    except ValueError:
+        declared = 0
+    if declared > 1024 * 1024:
+        raise HTTPException(status_code=413, detail="payload too large")
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature", "")
     try:
@@ -694,6 +738,15 @@ async def stripe_webhook(request: Request):
     customer_id = obj.get("customer")
 
     if event_type == "checkout.session.completed" and customer_id:
+        # M-2: only a subscription-mode checkout activates a subscriber. A
+        # one-time payment (or a checkout for another product) must not
+        # grant Pro credit — Stripe sends completed events for those too.
+        if obj.get("mode") != "subscription":
+            log.warning(
+                "checkout.session.completed ignored: mode=%r (expected 'subscription')",
+                obj.get("mode"),
+            )
+            return {"received": True}
         details = obj.get("customer_details") or {}
         email = details.get("email") if isinstance(details, dict) else None
         create_subscriber(customer_id, email)
@@ -706,18 +759,52 @@ async def stripe_webhook(request: Request):
     return {"received": True}
 
 
+def _session_is_paid_subscription(session: dict) -> bool:
+    """M-2: a checkout session mints credit only when it is a PAID
+    *subscription* checkout whose line items include the configured price.
+
+    A one-time payment mode, an unpaid session, or a checkout built for a
+    different product/price must never activate a subscriber — otherwise a
+    Stripe test event or a misconfigured product would grant free Pro.
+    """
+    if session.get("mode") != "subscription":
+        log.warning(
+            "checkout session %s ignored: mode=%r (expected 'subscription')",
+            session.get("id"),
+            session.get("mode"),
+        )
+        return False
+    if session.get("status") != "complete" or session.get("payment_status") != "paid":
+        return False
+    price_id = _stripe_price_id()
+    items = (session.get("line_items") or {}).get("data") or []
+    for item in items:
+        price = item.get("price") or {}
+        if price.get("id") == price_id:
+            return True
+    log.warning(
+        "checkout session %s ignored: no line item for price %s",
+        session.get("id"),
+        price_id,
+    )
+    return False
+
+
 @router.get("/billing/key")
 def billing_key(session_id: str):
     """Exchange a completed checkout session for a subscriber token (shown once)."""
     _require_enabled()
     _stripe_api()
     try:
-        session = stripe.checkout.Session.retrieve(session_id, expand=["customer"])
+        session = stripe.checkout.Session.retrieve(session_id, expand=["customer", "line_items"])
     except stripe.error.StripeError as exc:
         raise HTTPException(status_code=400, detail="unknown checkout session") from exc
     session = _to_plain_dict(session)
-    if session.get("status") != "complete" or session.get("payment_status") != "paid":
-        raise HTTPException(status_code=402, detail="checkout session not paid")
+    if not _session_is_paid_subscription(session):
+        raise HTTPException(
+            status_code=402,
+            detail="checkout session is not a paid subscription for the configured price",
+        )
     customer = session.get("customer")
     customer_id = customer.get("id") if isinstance(customer, dict) else customer
     if not customer_id:

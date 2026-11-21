@@ -7,12 +7,14 @@ Price checking + affiliate link MCP server (streamable HTTP) + REST API. Connect
 | Tool | What it does |
 |---|---|
 | `check_price(url)` | Fetch a product page and extract its current price → `{price, currency, title, availability, source}`. Sources tried in order: Open Graph meta tags, JSON-LD offers, common price selectors. SSRF-guarded. |
+| `find_best_price(query \| url \| upc, condition="new", country="US", max_results=10, path="direct")` | v2: compare one product across reputable stores (Tier A official APIs: Best Buy, Walmart, eBay — each live only when its key is set; Tier B: the v1 extractor on a supplied URL) → ranked offers with per-offer evidence and a verdict. A `best_offer` winner is named only on a high-confidence product match with a known delivered total; otherwise the verdict abstains (`best_found_total_unverified` / `no_confident_match`). $0.03/call in both paths. Broker layer: `path="broker"` affiliate-tags the winning offer's link when IOConnex is enrolled in that retailer's affiliate program (per-offer `affiliate` flag, `take_disclosure` in every response); ranking and prices never depend on the path or on commissions. |
 | `make_affiliate_link(url, tag, program="amazon")` | Append an affiliate tracking tag to a product URL. `program="amazon"` sets the `tag` param; any other valid name sets a custom query param. |
 
 ## Endpoints
 
 - `GET /health` → `{"status","version","x402"}`
 - `POST /price` → `{"url"}` → `{"price","currency","title","availability","source"}`
+- `POST /best-price` → `{"query"|"url"|"upc", "condition"?, "country"?, "max_results"?, "path"?}` → ranked best-price comparison (see `find_best_price`); `POST /paid/best-price` is the always-paid alias
 - `POST /affiliate` → `{"url","tag","program"}` → `{"url"}`
 - `POST /mcp` → MCP over streamable HTTP (stateless)
 
@@ -45,10 +47,12 @@ curl localhost:8000/health
 | `X402_PRICE_USDC` / `X402_PAY_TO` | `0.015` / unset | Per-tool: `X402_PRICE_CHECK_PRICE_USDC` ($0.02), `X402_PRICE_MAKE_AFFILIATE_LINK_USDC` ($0.005) |
 | `X402_FACILITATOR_URL` | `https://x402.org/facilitator` | **Sepolia testnet only**; mainnet = CDP facilitator URL + CDP keys |
 | `STRIPE_ENABLED` | `false` | Needs `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID` |
-| `SUBSCRIBER_MONTHLY_CREDIT_LIMIT` | `1000` | Pro subscriber fair-use cap (credits; 1 credit = $0.01 of x402 list price) |
-| `FREE_TIER_ENABLED` | `true` | Kill switch for the anonymous monthly free bucket |
-| `FREE_MONTHLY_CREDITS` | `50` | Monthly free credits per client IP (X-Forwarded-For, first entry) |
-| `ADMIN_KEY` | unset | **Required** for `GET /billing/stats`; long random string, 401s everything until set |
+| `BESTBUY_API_KEY` | unset | v2 Tier A: enables the Best Buy Products API source in `find_best_price` when set |
+| `WALMART_CONSUMER_ID` / `WALMART_PRIVATE_KEY` / `WALMART_KEY_VERSION` | unset | v2 Tier A: enables the Walmart Affiliate API source when all three are set (private key is the affiliate RSA PEM) |
+| `EBAY_CLIENT_ID` / `EBAY_CLIENT_SECRET` | unset | v2 Tier A: enables the eBay Browse API source when both are set |
+| `<RETAILER>_AFFILIATE_TAG` (`BESTBUY_` / `WALMART_` / `EBAY_`) | unset | Broker layer: our affiliate tag/ID for that retailer's affiliate program. **Set = enrolled** — the broker path may tag that retailer's winning links; unset = `affiliate: false` even when the retailer's API key (above) is live. An API key is not an affiliate enrollment. |
+| `<RETAILER>_AFFILIATE_PARAM` | program default (`ref` / `affp1` / `mkcid`) | Broker layer: query parameter the program expects the tag in, if it differs from the default |
+| `<RETAILER>_AFFILIATE_RATE` | unset | Broker layer: commission rate the program publishes for us, disclosed verbatim as `take_rate_if_known`; never estimated |
 
 ## Deploy
 

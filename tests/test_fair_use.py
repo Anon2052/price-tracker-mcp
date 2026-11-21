@@ -1,5 +1,6 @@
 """Tests for the credit-based fair-use cap on the Pro subscriber subscription.
 
+
 - 1 credit = $0.01 of x402 list price; cost per call = round(price/0.01, 1).
 - The credit cost derives from the same per-tool price map the x402
   middleware charges from (``x402.tool_price_usdc``) — no duplicated table.
@@ -33,6 +34,13 @@ from .test_payments import (
     _stub_price_backend,
     _x_payment_header,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_billing_db(monkeypatch, tmp_path):
+    """M-1: the replay table is persistent — point every test at a scratch
+    DB so claims can never leak between tests (or touch the real path)."""
+    monkeypatch.setenv("BILLING_DB_PATH", str(tmp_path / "billing.db"))
 
 
 def _db(monkeypatch, tmp_path):
@@ -100,8 +108,8 @@ def test_price_to_credits_spec_examples():
 
 def test_credit_cost_uses_same_price_map_as_x402(monkeypatch):
     """No duplicated price table: the cost derives from tool_price_usdc."""
-    assert x402_mod.tool_price_usdc("check_price") == Decimal("0.02")
-    assert x402_mod.price_to_credits(x402_mod.tool_price_usdc("check_price")) == 2.0
+    assert x402_mod.tool_price_usdc("check_price") == Decimal("0.008")
+    assert x402_mod.price_to_credits(x402_mod.tool_price_usdc("check_price")) == 0.8
     assert x402_mod.price_to_credits(x402_mod.tool_price_usdc("make_affiliate_link")) == 0.5
     # Env price overrides flow through automatically (single source of truth).
     monkeypatch.setenv("X402_PRICE_CHECK_PRICE_USDC", "0.025")
@@ -227,7 +235,7 @@ def subscriber_client(monkeypatch, tmp_path):
 
 def test_subscriber_under_cap_served(subscriber_client):
     token = billing.create_subscriber("cus_http1", None)
-    for _ in range(2):  # check_price $0.02 -> 2.0 credits each; 4.0 <= 4
+    for _ in range(2):  # check_price $0.008 -> 0.8 credits each; 1.6 <= 4
         r = subscriber_client.post(
             "/price",
             json={"url": "https://example.com/"},
@@ -239,7 +247,8 @@ def test_subscriber_under_cap_served(subscriber_client):
 def test_subscriber_over_cap_429_with_credit_body(subscriber_client):
     token = billing.create_subscriber("cus_http2", None)
     headers = {"X-Subscriber-Key": token}
-    for _ in range(2):
+    # 5 calls x 0.8 credits = 4.0: exactly the cap.
+    for _ in range(5):
         r = subscriber_client.post("/price", json={"url": "https://example.com/"}, headers=headers)
         assert r.status_code in (200, 422), r.text
     r = subscriber_client.post("/price", json={"url": "https://example.com/"}, headers=headers)
@@ -279,16 +288,20 @@ def test_overridden_price_deducts_fractional_credits_over_http(monkeypatch, tmp_
 def test_month_rollover_resets_cap_over_http(subscriber_client, monkeypatch):
     token = billing.create_subscriber("cus_http3", None)
     headers = {"X-Subscriber-Key": token}
-    for _ in range(2):
+    for _ in range(5):  # 5 x 0.8 = 4.0: exactly the cap
         subscriber_client.post("/price", json={"url": "https://example.com/"}, headers=headers)
     assert (
         subscriber_client.post(
             "/price", json={"url": "https://example.com/"}, headers=headers
         ).status_code
         == 429
-    ), "expected the cap to be hit on the 3rd call"
-    # New calendar month (UTC): the same key is served again.
-    monkeypatch.setattr(billing, "current_month", lambda: "2026-10")
+    ), "expected the cap to be hit on the 6th call"
+    # New calendar month (UTC): the same key is served again. Computed from
+    # the real month so the test can't go stale when the calendar turns.
+    real = billing.current_month()
+    year, mon = int(real[:4]), int(real[5:7])
+    nxt = f"{year + (mon == 12):04d}-{mon % 12 + 1:02d}"
+    monkeypatch.setattr(billing, "current_month", lambda: nxt)
     r = subscriber_client.post("/price", json={"url": "https://example.com/"}, headers=headers)
     assert r.status_code in (200, 422), r.text  # served again after rollover
 
@@ -303,14 +316,13 @@ def test_cap_covers_mcp_tools_call(subscriber_client):
         "method": "tools/call",
         "params": {"name": "check_price", "arguments": {"url": "https://example.com/"}},
     }
-    first = subscriber_client.post("/mcp", json=body, headers=headers)
-    assert first.status_code != 429  # served or tool-level error, not capped
-    second = subscriber_client.post("/mcp", json=body, headers=headers)
-    assert second.status_code != 429
-    third = subscriber_client.post("/mcp", json=body, headers=headers)
-    assert third.status_code == 429
-    assert third.json()["error"] == "subscriber_monthly_cap_exceeded"
-    assert third.json()["credits_used"] == 4.0
+    for _ in range(5):  # 5 x 0.8 = 4.0: exactly the cap
+        r = subscriber_client.post("/mcp", json=body, headers=headers)
+        assert r.status_code != 429  # served or tool-level error, not capped
+    sixth = subscriber_client.post("/mcp", json=body, headers=headers)
+    assert sixth.status_code == 429
+    assert sixth.json()["error"] == "subscriber_monthly_cap_exceeded"
+    assert sixth.json()["credits_used"] == 4.0
 
 
 def test_x402_payers_not_capped(monkeypatch, tmp_path):
@@ -361,7 +373,7 @@ def test_billing_usage_returns_accurate_numbers(usage_client):
     }
     usage_client.post("/price", json={"url": "https://example.com/"}, headers=headers)
     body = usage_client.get("/billing/usage", headers=headers).json()
-    assert body["credits_used"] == 2.0
+    assert body["credits_used"] == 0.8
     assert body["credit_limit"] == 4.0
 
 
@@ -370,7 +382,7 @@ def test_billing_usage_never_counts_or_429s(usage_client):
     when the key already hit the cap."""
     token = billing.create_subscriber("cus_usage2", None)
     headers = {"X-Subscriber-Key": token}
-    for _ in range(3):
+    for _ in range(5):  # 5 x 0.8 = 4.0: exactly the cap
         usage_client.post("/price", json={"url": "https://example.com/"}, headers=headers)
     r = usage_client.get("/billing/usage", headers=headers)
     assert r.status_code == 200, r.text

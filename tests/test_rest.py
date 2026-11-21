@@ -13,6 +13,14 @@ from price_tracker import price as price_mod
 from price_tracker import x402 as x402_mod
 from price_tracker.rest_app import create_app
 
+
+@pytest.fixture(autouse=True)
+def _isolated_billing_db(monkeypatch, tmp_path):
+    """M-1: the replay table is persistent — point every test at a scratch
+    DB so claims can never leak between tests (or touch the real path)."""
+    monkeypatch.setenv("BILLING_DB_PATH", str(tmp_path / "billing.db"))
+
+
 _OG_HTML = """<html><head>
 <title>Widget Pro</title>
 <meta property="og:price:amount" content="79.99" />
@@ -105,7 +113,7 @@ def test_rate_limiting(stubbed_backends):
 def _enable_x402(monkeypatch):
     monkeypatch.setenv("X402_ENABLED", "true")
     monkeypatch.setenv("X402_PRICE_USDC", "0.015")
-    monkeypatch.setenv("X402_PAY_TO", "0xAbC123")
+    monkeypatch.setenv("X402_PAY_TO", "0xAbC1230000000000000000000000000000000000")
     # Pure-x402 tests: pin the free tier off so anonymous calls hit the
     # 402 challenge instead of the free bucket.
     monkeypatch.setenv("FREE_TIER_ENABLED", "0")
@@ -116,10 +124,10 @@ def _payment_header(signature="0xSig789", **auth_over):
     now = int(time.time())
     auth = {
         "from": "0xDeF456",
-        "to": "0xAbC123",
+        "to": "0xAbC1230000000000000000000000000000000000",
         "value": "20000",
         "validAfter": str(now - 60),
-        "validBefore": str(now + 300),
+        "validBefore": str(now + 240),
         "nonce": "0xnonce1",
     }
     auth.update(auth_over)
