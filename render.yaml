@@ -3,7 +3,7 @@ services:
     name: price-tracker-mcp
     runtime: image
     image:
-      url: docker.io/ioconnex/price-tracker-mcp:20261121a
+      url: docker.io/ioconnex/price-tracker-mcp:20261121b
     healthCheckPath: /health
     plan: starter
     autoDeploy: true
