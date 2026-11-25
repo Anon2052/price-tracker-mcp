@@ -18,16 +18,16 @@ Price checking + affiliate link MCP server (streamable HTTP) + REST API. Connect
 - `POST /affiliate` → `{"url","tag","program"}` → `{"url"}`
 - `POST /mcp` → MCP over streamable HTTP (stateless)
 
-60/min per-IP rate limit (`RATE_LIMIT`). x402 micropayment metering is **facilitator-verified** (real EIP-3009 USDC authorizations on Base) behind `X402_ENABLED=false` — off by default. Stripe monthly plans via `/billing/*` are off by default too (`STRIPE_ENABLED=false`).
+60/min per-IP rate limit (`RATE_LIMIT`). x402 micropayment metering is **facilitator-verified** (real EIP-3009 USDC authorizations on Base) and **live** on the hosted service since Oct 20, 2026 (`X402_ENABLED=false` by default for self-hosted runs). Stripe monthly plans via `/billing/*` are off by default too (`STRIPE_ENABLED=false`).
 
 ## Payments
 
 Two independent, off-by-default payment paths:
 
-- **x402 per-call**: `X402_ENABLED=true` + `X402_PAY_TO` (your Base wallet) + `X402_FACILITATOR_URL`. Clients send an `X-Payment` header (base64 JSON v1 payload); the server verifies with the facilitator, serves, then settles. Prices: `check_price` $0.02, `make_affiliate_link` $0.005, overridable via `X402_PRICE_CHECK_PRICE_USDC` / `X402_PRICE_MAKE_AFFILIATE_LINK_USDC` (fallback `X402_PRICE_USDC=0.015`). JSON-RPC discovery methods stay free. The default facilitator (`https://x402.org/facilitator`) is **Base Sepolia testnet only** — mainnet needs `https://api.cdp.coinbase.com/platform/v2/x402` + CDP keys.
+- **x402 per-call**: `X402_ENABLED=true` + `X402_PAY_TO` (your Base wallet) + `X402_FACILITATOR_URL`. Clients send an `X-Payment` header (base64 JSON v1 payload); the server verifies with the facilitator, serves, then settles. Prices: `check_price` $0.008, `find_best_price` $0.03, `make_affiliate_link` $0.005, overridable via `X402_PRICE_CHECK_PRICE_USDC` / `X402_PRICE_FIND_BEST_PRICE_USDC` / `X402_PRICE_MAKE_AFFILIATE_LINK_USDC` (fallback `X402_PRICE_USDC=0.008`). JSON-RPC discovery methods stay free. The default facilitator (`https://x402.org/facilitator`) is **Base Sepolia testnet only** — mainnet needs `https://api.cdp.coinbase.com/platform/v2/x402` + CDP keys.
 - **Stripe monthly**: `STRIPE_ENABLED=true` + `STRIPE_SECRET_KEY` + `STRIPE_WEBHOOK_SECRET` + `STRIPE_PRICE_ID`. `POST /billing/checkout` → Checkout Session; the webhook provisions a subscriber; `GET /billing/key?session_id=...` returns a one-time subscriber token. Send it as `X-Subscriber-Key` to bypass per-call charges. Only SHA-256 hashes of tokens are stored (SQLite, `BILLING_DB_PATH`).
 
-Do not enable either in production before the AZ LLC is formed.
+Both paths are live on the hosted service; self-hosted runs still need their full config (see above) or they stay disabled.
 
 ## Run locally
 
@@ -42,9 +42,9 @@ curl localhost:8000/health
 | Var | Default | Notes |
 |---|---|---|
 | `PORT` / `HOST` | `8000` / `0.0.0.0` | `PORT` injected by the host |
-| `X402_ENABLED` | `false` | **Leave off** until AZ LLC formed + mainnet facilitator configured |
+| `X402_ENABLED` | `false` | **Live** on the hosted service since Oct 20, 2026. For self-hosted runs, configure the mainnet facilitator to enable |
 | `RATE_LIMIT` | `60/minute` | e.g. `600/hour` |
-| `X402_PRICE_USDC` / `X402_PAY_TO` | `0.015` / unset | Per-tool: `X402_PRICE_CHECK_PRICE_USDC` ($0.02), `X402_PRICE_MAKE_AFFILIATE_LINK_USDC` ($0.005) |
+| `X402_PRICE_USDC` / `X402_PAY_TO` | `0.008` / unset | Per-tool: `X402_PRICE_CHECK_PRICE_USDC` ($0.008), `X402_PRICE_FIND_BEST_PRICE_USDC` ($0.03), `X402_PRICE_MAKE_AFFILIATE_LINK_USDC` ($0.005) |
 | `X402_FACILITATOR_URL` | `https://x402.org/facilitator` | **Sepolia testnet only**; mainnet = CDP facilitator URL + CDP keys |
 | `STRIPE_ENABLED` | `false` | Needs `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID` |
 | `BESTBUY_API_KEY` | unset | v2 Tier A: enables the Best Buy Products API source in `find_best_price` when set |
@@ -62,3 +62,4 @@ See [DEPLOY.md](DEPLOY.md). One-click: `render.yaml` blueprint (Starter plan).
 
 - Watchlist + price-drop alerts (persistence + notifications)
 - Monetization enablement (AZ LLC, mainnet facilitator, Stripe products) before flipping payments on
+
